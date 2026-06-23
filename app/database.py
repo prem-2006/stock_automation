@@ -4,7 +4,8 @@ Handles engine creation, session management, and table initialization.
 """
 
 import os
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, event
+from sqlalchemy.engine import Engine
 from sqlalchemy.orm import sessionmaker, Session, declarative_base
 from app.config import get_settings
 from app.utils.logger import get_logger
@@ -16,6 +17,15 @@ Base = declarative_base()
 # Global engine and session factory (initialized on startup)
 _engine = None
 _SessionLocal = None
+
+@event.listens_for(Engine, "connect")
+def set_sqlite_pragma(dbapi_connection, connection_record):
+    """Enable WAL mode for better SQLite concurrency."""
+    if get_settings().DATABASE_URL.startswith("sqlite"):
+        cursor = dbapi_connection.cursor()
+        cursor.execute("PRAGMA journal_mode=WAL")
+        cursor.execute("PRAGMA synchronous=NORMAL")
+        cursor.close()
 
 
 def get_engine():

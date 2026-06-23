@@ -142,6 +142,7 @@ async def whatsapp_webhook(
     # Get or create conversation
     conv = _get_or_create_conversation(db, phone_number)
     conv.last_message_at = datetime.now(UTC)
+    db.commit()  # Commit immediately to release SQLite write locks
 
     # Create TwiML response
     resp = MessagingResponse()
