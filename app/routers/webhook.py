@@ -4,8 +4,11 @@ WhatsApp Webhook Router.
 Handles incoming Twilio WhatsApp messages and manages conversation state.
 Implements a state machine for the chat flow:
   idle → awaiting_year → processing → completed
+
+Compatible with Vercel serverless (synchronous) and traditional servers (background threads).
 """
 
+import os
 import threading
 from datetime import datetime, UTC
 from typing import Optional
@@ -28,6 +31,9 @@ router = APIRouter(prefix="/webhook", tags=["WhatsApp"])
 scanner_service = ScannerService()
 whatsapp_service = WhatsAppService()
 
+# Detect Vercel
+IS_VERCEL = os.environ.get("VERCEL", "") == "1" or os.environ.get("VERCEL_ENV") is not None
+
 
 def _get_or_create_conversation(db: Session, phone_number: str) -> Conversation:
     """Get existing conversation or create a new one."""
@@ -44,19 +50,18 @@ def _get_or_create_conversation(db: Session, phone_number: str) -> Conversation:
     return conv
 
 
-def _process_scan_in_background(scan_id: str, phone_number: str):
-    """Run the scan in a background thread and send results via WhatsApp."""
+def _process_scan_and_notify(scan_id: str, phone_number: str):
+    """Run the scan and send results via WhatsApp."""
     try:
-        logger.info(f"Background scan started: {scan_id}")
+        logger.info(f"Scan started: {scan_id}")
         summary = scanner_service.run_scan(scan_id)
 
         # Send results via WhatsApp
         message = whatsapp_service.format_scan_summary(summary)
 
         report_path = summary.get("report_path")
-        if report_path:
+        if report_path and not IS_VERCEL:
             settings = get_settings()
-            # Convert file path to public URL
             filename = report_path.replace("\\", "/").split("/")[-1]
             media_url = f"{settings.BASE_URL}/reports/{filename}"
 
@@ -66,6 +71,7 @@ def _process_scan_in_background(scan_id: str, phone_number: str):
                 media_url=media_url,
             )
         else:
+            # On Vercel, /tmp files aren't publicly accessible, send text only
             whatsapp_service.send_message(to=phone_number, body=message)
 
         # Update conversation state
@@ -82,10 +88,10 @@ def _process_scan_in_background(scan_id: str, phone_number: str):
         finally:
             session.close()
 
-        logger.info(f"Background scan completed and results sent: {scan_id}")
+        logger.info(f"Scan completed and results sent: {scan_id}")
 
     except Exception as e:
-        logger.error(f"Background scan failed: {scan_id} — {e}", exc_info=True)
+        logger.error(f"Scan failed: {scan_id} — {e}", exc_info=True)
 
         # Notify user of failure
         whatsapp_service.send_message(
@@ -122,6 +128,9 @@ async def whatsapp_webhook(
 
     Twilio sends POST requests with form data when a user messages the WhatsApp number.
     This endpoint processes the message, manages conversation state, and responds with TwiML.
+
+    On Vercel: scan runs synchronously, results sent via Twilio API before response.
+    On traditional server: scan runs in background thread.
     """
     from twilio.twiml.messaging_response import MessagingResponse
 
@@ -164,20 +173,31 @@ async def whatsapp_webhook(
                 conv.current_scan_id = scan_id
                 db.commit()
 
-                resp.message(
-                    f"🔍 *Scanning IPO year {year}...*\n\n"
-                    f"⏳ This may take a few minutes depending on the number of stocks.\n"
-                    f"I'll send you the results with an Excel report once done.\n\n"
-                    f"Scan ID: `{scan_id[:8]}`"
-                )
+                if IS_VERCEL:
+                    # Serverless: run synchronously, send results via Twilio API
+                    # Reply immediately, then process
+                    resp.message(
+                        f"🔍 *Scanning IPO year {year}...*\n\n"
+                        f"⏳ Processing now. Results will be sent shortly."
+                    )
 
-                # Launch background scan
-                thread = threading.Thread(
-                    target=_process_scan_in_background,
-                    args=(scan_id, phone_number),
-                    daemon=True,
-                )
-                thread.start()
+                    # Run scan synchronously and send results via Twilio API
+                    _process_scan_and_notify(scan_id, phone_number)
+                else:
+                    # Traditional server: background thread
+                    resp.message(
+                        f"🔍 *Scanning IPO year {year}...*\n\n"
+                        f"⏳ This may take a few minutes depending on the number of stocks.\n"
+                        f"I'll send you the results with an Excel report once done.\n\n"
+                        f"Scan ID: `{scan_id[:8]}`"
+                    )
+
+                    thread = threading.Thread(
+                        target=_process_scan_and_notify,
+                        args=(scan_id, phone_number),
+                        daemon=True,
+                    )
+                    thread.start()
 
             else:
                 resp.message(
@@ -196,17 +216,25 @@ async def whatsapp_webhook(
         if scan_id:
             status = scanner_service.get_scan_status(scan_id)
             if status:
-                progress = ""
-                if status.get("total_stocks", 0) > 0:
-                    progress = (
-                        f"\n📊 Progress: {status.get('scanned_stocks', 0)}"
-                        f"/{status.get('total_stocks', 0)} stocks scanned"
+                if status.get("status") == "completed":
+                    conv.current_state = "completed"
+                    db.commit()
+                    resp.message(
+                        "✅ Your scan is complete!\n\n"
+                        "Would you like to scan another year?\n\n"
+                        "📅 *Enter IPO Year* (Example: 2020)"
                     )
-
-                resp.message(
-                    f"⏳ Your scan is still in progress.{progress}\n\n"
-                    f"Please wait — I'll send the results automatically when done."
-                )
+                else:
+                    progress = ""
+                    if status.get("total_stocks", 0) > 0:
+                        progress = (
+                            f"\n📊 Progress: {status.get('scanned_stocks', 0)}"
+                            f"/{status.get('total_stocks', 0)} stocks scanned"
+                        )
+                    resp.message(
+                        f"⏳ Your scan is still in progress.{progress}\n\n"
+                        f"Please wait — I'll send the results automatically when done."
+                    )
             else:
                 resp.message("⏳ Your scan is being processed. Please wait...")
         else:

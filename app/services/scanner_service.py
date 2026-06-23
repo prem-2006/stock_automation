@@ -11,7 +11,7 @@ Core screening engine that:
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime
+from datetime import datetime, UTC
 from typing import List, Dict, Optional, Tuple
 
 import pandas as pd
@@ -56,7 +56,7 @@ class ScannerService:
                 year=year,
                 status="pending",
                 phone_number=phone_number,
-                created_at=datetime.utcnow(),
+                created_at=datetime.now(UTC),
             )
             session.add(job)
             session.commit()
@@ -100,7 +100,7 @@ class ScannerService:
 
             if not stocks:
                 job.status = "completed"
-                job.completed_at = datetime.utcnow()
+                job.completed_at = datetime.now(UTC)
                 job.error_message = f"No stocks found for IPO year {year}"
                 session.commit()
                 logger.warning(f"No stocks found for year {year}")
@@ -146,7 +146,7 @@ class ScannerService:
             job.status = "completed"
             job.qualified_stocks = len(qualified_results)
             job.report_path = report_path
-            job.completed_at = datetime.utcnow()
+            job.completed_at = datetime.now(UTC)
             session.commit()
 
             logger.info(
@@ -162,7 +162,7 @@ class ScannerService:
             if job:
                 job.status = "failed"
                 job.error_message = str(e)
-                job.completed_at = datetime.utcnow()
+                job.completed_at = datetime.now(UTC)
                 session.commit()
             raise
         finally:

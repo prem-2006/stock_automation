@@ -131,19 +131,19 @@ class HistoricalDataCache:
     def set_cached_data(self, symbol: str, data_json: str) -> None:
         """Store historical data JSON for a symbol."""
         from app.models import CachedStockData
-        from datetime import datetime
+        from datetime import datetime, UTC
 
         session = self.db_session_factory()
         try:
             existing = session.query(CachedStockData).filter_by(symbol=symbol).first()
             if existing:
                 existing.data_json = data_json
-                existing.cached_at = datetime.utcnow()
+                existing.cached_at = datetime.now(UTC)
             else:
                 cached = CachedStockData(
                     symbol=symbol,
                     data_json=data_json,
-                    cached_at=datetime.utcnow(),
+                    cached_at=datetime.now(UTC),
                 )
                 session.add(cached)
             session.commit()

@@ -1,0 +1,39 @@
+# ============================================
+# Render Blueprint — IPO Breakout Stock Screener
+# https://render.com/docs/blueprint-spec
+# ============================================
+
+services:
+  - type: web
+    name: ipo-breakout-scanner
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
+    envVars:
+      - key: TWILIO_ACCOUNT_SID
+        sync: false
+      - key: TWILIO_AUTH_TOKEN
+        sync: false
+      - key: TWILIO_WHATSAPP_NUMBER
+        value: "whatsapp:+14155238886"
+      - key: BASE_URL
+        value: "https://ipo-breakout-scanner.onrender.com"
+      - key: DATABASE_URL
+        value: "sqlite:///./db/stock_screener.db"
+      - key: MAX_WORKERS
+        value: "10"
+      - key: API_CALL_DELAY
+        value: "0.5"
+      - key: MAX_RETRIES
+        value: "3"
+      - key: CACHE_TTL_HOURS
+        value: "24"
+      - key: LOG_LEVEL
+        value: "INFO"
+      - key: PYTHON_VERSION
+        value: "3.11.9"
+    disk:
+      name: app-data
+      mountPath: /opt/render/project/src/db
+      sizeGB: 1

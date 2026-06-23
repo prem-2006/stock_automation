@@ -6,6 +6,8 @@ Provides REST API endpoints for:
 - Checking scan status
 - Downloading reports
 - Health checks
+
+Compatible with Vercel serverless (synchronous mode) and traditional servers (background mode).
 """
 
 import os
@@ -28,20 +30,21 @@ router = APIRouter(tags=["Scan"])
 scanner_service = ScannerService()
 whatsapp_service = WhatsAppService()
 
+# Detect Vercel
+IS_VERCEL = os.environ.get("VERCEL", "") == "1" or os.environ.get("VERCEL_ENV") is not None
+
 
 def _run_scan_background(scan_id: str, phone_number: Optional[str] = None):
-    """Execute scan in background thread."""
+    """Execute scan in background thread (traditional server only)."""
     try:
         summary = scanner_service.run_scan(scan_id)
 
-        # If a phone number was provided, send results via WhatsApp
         if phone_number:
             message = whatsapp_service.format_scan_summary(summary)
             report_path = summary.get("report_path")
 
             if report_path:
                 from app.config import get_settings
-
                 settings = get_settings()
                 filename = report_path.replace("\\", "/").split("/")[-1]
                 media_url = f"{settings.BASE_URL}/reports/{filename}"
@@ -58,51 +61,62 @@ def _run_scan_background(scan_id: str, phone_number: Optional[str] = None):
 @router.post("/scan", response_model=dict)
 async def trigger_scan(request: ScanRequest):
     """
-    Manually trigger a stock scan for a given IPO year.
+    Trigger a stock scan for a given IPO year.
 
-    The scan runs in the background. Use GET /scan/{scan_id} to check status.
-
-    Args:
-        request: ScanRequest with year and optional phone_number
-
-    Returns:
-        Dict with scan_id and status
+    On Vercel: runs synchronously and returns results directly.
+    On traditional server: runs in background, returns scan_id for polling.
     """
     year = request.year
     phone_number = request.phone_number
 
-    logger.info(f"Manual scan triggered for year {year}")
+    logger.info(f"Scan triggered for year {year}")
 
     # Create scan job
     scan_id = scanner_service.create_scan_job(year, phone_number=phone_number)
 
-    # Launch background scan
-    thread = threading.Thread(
-        target=_run_scan_background,
-        args=(scan_id, phone_number),
-        daemon=True,
-    )
-    thread.start()
+    if IS_VERCEL:
+        # Synchronous execution on serverless
+        try:
+            summary = scanner_service.run_scan(scan_id)
 
-    return {
-        "scan_id": scan_id,
-        "year": year,
-        "status": "started",
-        "message": f"Scan started for IPO year {year}. Use GET /scan/{scan_id} to check status.",
-    }
+            # Send WhatsApp if phone number provided
+            if phone_number:
+                message = whatsapp_service.format_scan_summary(summary)
+                whatsapp_service.send_message(to=phone_number, body=message)
+
+            return {
+                "scan_id": scan_id,
+                "year": year,
+                "status": "completed",
+                "total_scanned": summary.get("total_scanned", 0),
+                "qualified_count": summary.get("qualified_count", 0),
+                "qualification_pct": summary.get("qualification_pct", 0),
+                "report_path": summary.get("report_path"),
+                "top_10": summary.get("top_10", []),
+            }
+        except Exception as e:
+            logger.error(f"Scan failed: {e}", exc_info=True)
+            raise HTTPException(status_code=500, detail=f"Scan failed: {str(e)}")
+    else:
+        # Background execution on traditional server
+        thread = threading.Thread(
+            target=_run_scan_background,
+            args=(scan_id, phone_number),
+            daemon=True,
+        )
+        thread.start()
+
+        return {
+            "scan_id": scan_id,
+            "year": year,
+            "status": "started",
+            "message": f"Scan started for IPO year {year}. Use GET /scan/{scan_id} to check status.",
+        }
 
 
 @router.get("/scan/{scan_id}")
 async def get_scan_status(scan_id: str):
-    """
-    Get the current status and results of a scan job.
-
-    Args:
-        scan_id: UUID of the scan job
-
-    Returns:
-        Scan job status with results if completed
-    """
+    """Get the current status and results of a scan job."""
     status = scanner_service.get_scan_status(scan_id)
 
     if not status:
@@ -113,33 +127,27 @@ async def get_scan_status(scan_id: str):
 
 @router.get("/reports/{filename}")
 async def download_report(filename: str):
-    """
-    Download a generated Excel report.
+    """Download a generated Excel report."""
+    # Check both possible report directories
+    possible_dirs = ["/tmp/reports", os.path.join("app", "static", "reports")]
 
-    Args:
-        filename: Name of the report file
+    for reports_dir in possible_dirs:
+        filepath = os.path.join(reports_dir, filename)
+        if os.path.exists(filepath):
+            # Security: prevent path traversal
+            real_path = os.path.realpath(filepath)
+            real_reports = os.path.realpath(reports_dir)
+            if not real_path.startswith(real_reports):
+                raise HTTPException(status_code=403, detail="Access denied")
 
-    Returns:
-        Excel file download
-    """
-    reports_dir = os.path.join("app", "static", "reports")
-    filepath = os.path.join(reports_dir, filename)
+            return FileResponse(
+                path=filepath,
+                filename=filename,
+                media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                headers={"Content-Disposition": f"attachment; filename={filename}"},
+            )
 
-    if not os.path.exists(filepath):
-        raise HTTPException(status_code=404, detail="Report not found")
-
-    # Security: prevent path traversal
-    real_path = os.path.realpath(filepath)
-    real_reports = os.path.realpath(reports_dir)
-    if not real_path.startswith(real_reports):
-        raise HTTPException(status_code=403, detail="Access denied")
-
-    return FileResponse(
-        path=filepath,
-        filename=filename,
-        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        headers={"Content-Disposition": f"attachment; filename={filename}"},
-    )
+    raise HTTPException(status_code=404, detail="Report not found")
 
 
 @router.get("/health", response_model=HealthResponse)

@@ -26,8 +26,9 @@ from app.utils.logger import get_logger
 
 logger = get_logger("excel_service")
 
-# Report output directory
-REPORTS_DIR = os.path.join("app", "static", "reports")
+# Report output directory — use /tmp on Vercel (only writable dir in serverless)
+IS_VERCEL = os.environ.get("VERCEL", "") == "1" or os.environ.get("VERCEL_ENV") is not None
+REPORTS_DIR = "/tmp/reports" if IS_VERCEL else os.path.join("app", "static", "reports")
 
 
 class ExcelService:

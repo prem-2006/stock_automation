@@ -1,11 +1,16 @@
 """
 Application configuration using Pydantic BaseSettings.
 Loads values from environment variables and .env file.
+
+Compatible with Vercel serverless (uses /tmp for writable paths).
 """
 
 import os
 from functools import lru_cache
 from pydantic_settings import BaseSettings
+
+# Detect Vercel environment
+IS_VERCEL = os.environ.get("VERCEL", "") == "1" or os.environ.get("VERCEL_ENV") is not None
 
 
 class Settings(BaseSettings):
@@ -22,11 +27,12 @@ class Settings(BaseSettings):
     PORT: int = 8000
 
     # --- Database ---
-    DATABASE_URL: str = "sqlite:///./db/stock_screener.db"
+    # On Vercel, use /tmp for SQLite (only writable directory)
+    DATABASE_URL: str = "sqlite:////tmp/db/stock_screener.db" if IS_VERCEL else "sqlite:///./db/stock_screener.db"
 
     # --- Processing ---
-    MAX_WORKERS: int = 10
-    API_CALL_DELAY: float = 0.5
+    MAX_WORKERS: int = 5 if IS_VERCEL else 10  # Fewer workers on serverless
+    API_CALL_DELAY: float = 0.3
     MAX_RETRIES: int = 3
 
     # --- Cache ---
@@ -36,7 +42,7 @@ class Settings(BaseSettings):
     LOG_LEVEL: str = "INFO"
 
     model_config = {
-        "env_file": ".env",
+        "env_file": ".env" if not IS_VERCEL else None,
         "env_file_encoding": "utf-8",
         "case_sensitive": True,
     }

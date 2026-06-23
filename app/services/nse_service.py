@@ -39,7 +39,10 @@ class NSEService:
 
     def __init__(self):
         settings = get_settings()
-        self.cache = FileCache(cache_dir="data", ttl_hours=settings.CACHE_TTL_HOURS)
+        # Use /tmp on Vercel (only writable directory)
+        is_vercel = os.environ.get("VERCEL", "") == "1" or os.environ.get("VERCEL_ENV") is not None
+        cache_dir = "/tmp/data" if is_vercel else "data"
+        self.cache = FileCache(cache_dir=cache_dir, ttl_hours=settings.CACHE_TTL_HOURS)
         self.max_retries = settings.MAX_RETRIES
         self._session = None
 
