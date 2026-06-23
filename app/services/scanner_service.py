@@ -260,6 +260,15 @@ class ScannerService:
                 logger.warning(f"Insufficient data for {symbol} (only {len(monthly_data)} months)")
                 return result
 
+            # Strict IPO Year Check: Reject cross-listed stocks that traded before the requested year
+            first_yf_date = monthly_data.index[0]
+            first_yf_year = first_yf_date.year
+
+            if first_yf_year < year:
+                logger.info(f"Skipping {symbol}: True IPO was in {first_yf_year}, before requested year {year}")
+                result["error"] = f"Older IPO ({first_yf_year})"
+                return result
+
             # Step 1: Get the first listed month's HIGH
             first_month_high = float(monthly_data["High"].iloc[0])
             result["ipo_first_month_high"] = round(first_month_high, 2)
