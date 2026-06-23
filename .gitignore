@@ -1,0 +1,57 @@
+# ============================================
+# .gitignore — IPO Breakout Stock Screener
+# ============================================
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg-info/
+dist/
+build/
+eggs/
+*.egg
+.Python
+
+# --- Virtual Environment ---
+venv/
+.venv/
+env/
+ENV/
+
+# --- IDE ---
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# --- Environment & Secrets ---
+.env
+!.env.example
+
+# --- Database ---
+db/*.db
+db/*.db-journal
+
+# --- Cache & Data ---
+data/*.cache
+data/*.meta
+data/nse_equity_master.csv
+
+# --- Logs ---
+logs/
+
+# --- Generated Reports ---
+app/static/reports/*.xlsx
+
+# --- OS ---
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# --- Testing ---
+.coverage
+htmlcov/
+.pytest_cache/

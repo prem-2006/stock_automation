@@ -1,0 +1,32 @@
+# ============================================
+# Docker Compose — IPO Breakout Stock Screener
+# ============================================
+
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: ipo-screener
+    ports:
+      - "${PORT:-8000}:8000"
+    env_file:
+      - .env
+    volumes:
+      # Persist database and reports
+      - ./db:/app/db
+      - ./data:/app/data
+      - ./logs:/app/logs
+      - ./app/static/reports:/app/app/static/reports
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import requests; requests.get('http://localhost:8000/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+          cpus: "2.0"
