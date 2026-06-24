@@ -127,6 +127,7 @@ class ExcelService:
             "IPO First Month High",
             "Breakout Month",
             "Breakout Close",
+            "Previous Month Close",
             "Current Price",
             "% Above IPO High",
             "Listing Date",
@@ -166,6 +167,7 @@ class ExcelService:
                 result.get("ipo_first_month_high"),
                 result.get("breakout_month", "N/A"),
                 result.get("breakout_close"),
+                result.get("previous_month_close"),
                 result.get("current_price"),
                 result.get("pct_above_ipo_high"),
                 listing_date_str,
@@ -182,7 +184,7 @@ class ExcelService:
                     cell.fill = alt_row_fill
 
             # Format percentage column
-            pct_cell = ws.cell(row=row_idx, column=8)
+            pct_cell = ws.cell(row=row_idx, column=9)
             if pct_cell.value and isinstance(pct_cell.value, (int, float)):
                 pct_cell.number_format = "0.00%"
                 pct_cell.value = pct_cell.value / 100  # Convert to decimal for Excel %
@@ -192,13 +194,13 @@ class ExcelService:
                     pct_cell.fill = green_fill
 
             # Format currency columns
-            for col in [4, 6, 7]:  # IPO High, Breakout Close, Current Price
+            for col in [4, 6, 7, 8]:  # IPO High, Breakout Close, Prev Month Close, Current Price
                 cell = ws.cell(row=row_idx, column=col)
                 if cell.value and isinstance(cell.value, (int, float)):
                     cell.number_format = "₹#,##0.00"
 
         # Auto-fit column widths
-        column_widths = [15, 35, 12, 22, 18, 18, 16, 20, 15]
+        column_widths = [15, 35, 12, 22, 18, 18, 22, 16, 20, 15]
         for idx, width in enumerate(column_widths, 1):
             ws.column_dimensions[get_column_letter(idx)].width = width
 
@@ -224,7 +226,7 @@ class ExcelService:
 
         headers = [
             "Symbol", "Company Name", "Qualified", "IPO First Month High",
-            "Breakout Month", "Breakout Close", "Current Price", "% Above IPO High",
+            "Breakout Month", "Breakout Close", "Previous Month Close", "Current Price", "% Above IPO High",
         ]
 
         for col_idx, header in enumerate(headers, 1):
@@ -242,6 +244,7 @@ class ExcelService:
                 result.get("ipo_first_month_high"),
                 result.get("breakout_month", "N/A"),
                 result.get("breakout_close"),
+                result.get("previous_month_close"),
                 result.get("current_price"),
                 result.get("pct_above_ipo_high"),
             ]
@@ -255,7 +258,7 @@ class ExcelService:
                 cell.alignment = Alignment(horizontal="center")
 
         # Auto-fit
-        column_widths = [15, 35, 12, 22, 18, 18, 16, 20]
+        column_widths = [15, 35, 12, 22, 18, 18, 22, 16, 20]
         for idx, width in enumerate(column_widths, 1):
             ws.column_dimensions[get_column_letter(idx)].width = width
 

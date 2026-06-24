@@ -123,7 +123,7 @@ class TestExcelGeneration:
 
         expected_headers = [
             "Symbol", "Company Name", "IPO Year", "IPO First Month High",
-            "Breakout Month", "Breakout Close", "Current Price",
+            "Breakout Month", "Breakout Close", "Previous Month Close", "Current Price",
             "% Above IPO High", "Listing Date",
         ]
 

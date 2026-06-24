@@ -75,6 +75,7 @@ class ScanResult(Base):
     ipo_first_month_high = Column(Float, nullable=True)
     breakout_month = Column(String(20), nullable=True)  # YYYY-MM format
     breakout_close = Column(Float, nullable=True)
+    previous_month_close = Column(Float, nullable=True)
     current_price = Column(Float, nullable=True)
     pct_above_ipo_high = Column(Float, nullable=True)
     listing_date = Column(DateTime, nullable=True)

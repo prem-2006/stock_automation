@@ -157,6 +157,7 @@ class ScannerService:
                         ipo_first_month_high=safe_round(result.get("ipo_first_month_high")),
                         breakout_month=result.get("breakout_month"),
                         breakout_close=safe_round(result.get("breakout_close")),
+                        previous_month_close=safe_round(result.get("previous_month_close")),
                         current_price=safe_round(result.get("current_price")),
                         pct_above_ipo_high=safe_round(result.get("pct_above_ipo_high")),
                         listing_date=result.get("listing_date"),
@@ -298,6 +299,7 @@ class ScannerService:
             "ipo_first_month_high": None,
             "breakout_month": None,
             "breakout_close": None,
+            "previous_month_close": None,
             "current_price": None,
             "pct_above_ipo_high": None,
         }
@@ -348,10 +350,15 @@ class ScannerService:
 
             result["ipo_first_month_high"] = safe_round(first_month_high)
 
-            # Get current price (last available close)
+            # Get current price and previous month close
             current_price = safe_float(monthly_data["Close"].iloc[-1])
             if current_price is not None and current_price > 0:
                 result["current_price"] = safe_round(current_price)
+                
+            if len(monthly_data) >= 2:
+                prev_close = safe_float(monthly_data["Close"].iloc[-2])
+                if prev_close is not None and prev_close > 0:
+                    result["previous_month_close"] = safe_round(prev_close)
 
             # Update listing date from data if not available
             if result["listing_date"] is None:
@@ -505,6 +512,7 @@ class ScannerService:
                         "ipo_first_month_high": r.ipo_first_month_high,
                         "breakout_month": r.breakout_month,
                         "breakout_close": r.breakout_close,
+                        "previous_month_close": r.previous_month_close,
                         "current_price": r.current_price,
                         "pct_above_ipo_high": r.pct_above_ipo_high,
                     }
