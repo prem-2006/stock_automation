@@ -47,10 +47,10 @@ class TestScannerLogic:
     """Test the core breakout detection logic."""
 
     def test_breakout_detection_qualifies(self):
-        """Test that a stock qualifies when previous month close exceeds first month high."""
+        """Test that a stock qualifies when previous month close is below first month high."""
         data = _create_mock_monthly_data(
             first_month_high=100.0,
-            breakout_close=120.0,
+            breakout_close=80.0,
             months=12,
             has_breakout=True,
         )
@@ -60,22 +60,23 @@ class TestScannerLogic:
         assert first_month_high == 100.0
 
         # Check breakout condition
-        qualified = prev_close > first_month_high
+        qualified = prev_close < first_month_high
         
         assert qualified is True
 
     def test_no_breakout(self):
-        """Test that a stock does not qualify when previous month close does not exceed first month high."""
+        """Test that a stock does not qualify when previous month close exceeds first month high."""
         data = _create_mock_monthly_data(
             first_month_high=100.0,
+            breakout_close=120.0,
             months=12,
-            has_breakout=False,
+            has_breakout=True,
         )
 
         first_month_high = float(data["High"].iloc[0])
         prev_close = float(data["Close"].iloc[-2])
 
-        qualified = prev_close > first_month_high
+        qualified = prev_close < first_month_high
 
         assert qualified is False
 
