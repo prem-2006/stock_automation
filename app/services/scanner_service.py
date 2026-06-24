@@ -357,8 +357,24 @@ class ScannerService:
             if result["listing_date"] is None:
                 result["listing_date"] = monthly_data.index[0]
 
-            # Step 2: Check breakout condition on subsequent months
-            for i in range(1, len(monthly_data)):
+            # Step 1.5: Enforce second month condition
+            # The second month's high and close must be strictly less than the first month's high.
+            if len(monthly_data) > 1:
+                second_month_high = safe_float(monthly_data["High"].iloc[1])
+                second_month_close = safe_float(monthly_data["Close"].iloc[1])
+
+                if second_month_high is not None and second_month_high >= first_month_high:
+                    logger.info(f"Skipping {symbol}: Second month high ({second_month_high}) >= first month high ({first_month_high})")
+                    result["error"] = "Failed 2nd month condition (High)"
+                    return result
+
+                if second_month_close is not None and second_month_close >= first_month_high:
+                    logger.info(f"Skipping {symbol}: Second month close ({second_month_close}) >= first month high ({first_month_high})")
+                    result["error"] = "Failed 2nd month condition (Close)"
+                    return result
+
+            # Step 2: Check breakout condition on subsequent months (starting from month 3, i.e., index 2)
+            for i in range(2, len(monthly_data)):
                 month_close = safe_float(monthly_data["Close"].iloc[i])
 
                 if month_close is None:

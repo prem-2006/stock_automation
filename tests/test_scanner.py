@@ -63,7 +63,7 @@ class TestScannerLogic:
         breakout_month = None
         breakout_close = None
 
-        for i in range(1, len(data)):
+        for i in range(2, len(data)):
             month_close = float(data["Close"].iloc[i])
             if month_close > first_month_high:
                 qualified = True
@@ -86,7 +86,7 @@ class TestScannerLogic:
         first_month_high = float(data["High"].iloc[0])
 
         qualified = False
-        for i in range(1, len(data)):
+        for i in range(2, len(data)):
             month_close = float(data["Close"].iloc[i])
             if month_close > first_month_high:
                 qualified = True
@@ -120,36 +120,35 @@ class TestScannerLogic:
         assert first_month_high == 100.0  # Only first month's high matters
 
         qualified = False
-        for i in range(1, len(data)):
+        for i in range(2, len(data)):
             if float(data["Close"].iloc[i]) > first_month_high:
                 qualified = True
                 break
 
         assert qualified is False  # Even though later HIGHS exceed 100, no CLOSE does
 
-    def test_immediate_breakout(self):
-        """Test breakout in the second month (earliest possible)."""
+    def test_second_month_condition_failure(self):
+        """Test that a stock fails if its second month high or close >= first month high."""
         dates = pd.date_range(start="2020-01-01", periods=3, freq="MS")
         data = pd.DataFrame(
             {
                 "Open": [90, 105, 110],
-                "High": [100, 115, 120],
+                "High": [100, 115, 120],  # Second month high 115 >= 100
                 "Low": [80, 95, 100],
-                "Close": [95, 110, 115],  # Second month close > first month high
+                "Close": [95, 110, 115],  # Second month close 110 >= 100
                 "Volume": [1000000] * 3,
             },
             index=dates,
         )
 
         first_month_high = float(data["High"].iloc[0])
-        breakout_month = None
-
-        for i in range(1, len(data)):
-            if float(data["Close"].iloc[i]) > first_month_high:
-                breakout_month = data.index[i].strftime("%Y-%m")
-                break
-
-        assert breakout_month == "2020-02"
+        second_month_high = float(data["High"].iloc[1])
+        second_month_close = float(data["Close"].iloc[1])
+        
+        # This condition is what we check in the app
+        failed_condition = (second_month_high >= first_month_high) or (second_month_close >= first_month_high)
+        
+        assert failed_condition is True
 
     def test_insufficient_data(self):
         """Test handling of stocks with insufficient data."""
