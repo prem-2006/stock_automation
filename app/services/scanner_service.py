@@ -15,6 +15,7 @@ Fully hardened against:
 """
 
 import math
+import random
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -301,8 +302,9 @@ class ScannerService:
             "pct_above_ipo_high": None,
         }
 
-        # Rate limiting
-        time.sleep(self.settings.API_CALL_DELAY)
+        # Rate limiting with jitter to avoid Yahoo Finance rate limiting
+        delay = self.settings.API_CALL_DELAY + random.uniform(0.2, 1.0)
+        time.sleep(delay)
 
         try:
             # Fetch monthly OHLC data with retries
@@ -404,14 +406,19 @@ class ScannerService:
                     data = data.dropna(how="all")
                     if not data.empty:
                         return data
+                else:
+                    logger.warning(f"Empty data for {yf_symbol} on attempt {attempt}")
 
             except Exception as e:
                 logger.warning(
                     f"yfinance fetch attempt {attempt}/{self.settings.MAX_RETRIES} "
                     f"for {yf_symbol} failed: {e}"
                 )
-                if attempt < self.settings.MAX_RETRIES:
-                    time.sleep(2 ** attempt)
+
+            if attempt < self.settings.MAX_RETRIES:
+                # Exponential backoff with jitter to avoid rate limits
+                backoff = (2 ** attempt) + random.uniform(0.5, 2.0)
+                time.sleep(backoff)
 
         return None
 

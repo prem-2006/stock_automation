@@ -31,8 +31,9 @@ class Settings(BaseSettings):
     DATABASE_URL: str = "sqlite:////tmp/db/stock_screener.db" if IS_VERCEL else "sqlite:///./db/stock_screener.db"
 
     # --- Processing ---
-    MAX_WORKERS: int = 5 if IS_VERCEL else 10  # Fewer workers on serverless
-    API_CALL_DELAY: float = 0.3
+    # Keep workers low to avoid Yahoo Finance rate limiting from server IPs
+    MAX_WORKERS: int = 2 if IS_VERCEL else 3
+    API_CALL_DELAY: float = 1.0  # 1 second between requests per worker
     MAX_RETRIES: int = 3
 
     # --- Cache ---
