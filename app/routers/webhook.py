@@ -185,15 +185,7 @@ async def telegram_webhook(
                 else:
                     # Valid year, create scan job
                     try:
-                        job = ScanJob(
-                            year=year,
-                            status="pending",
-                            created_at=datetime.now(UTC),
-                        )
-                        db.add(job)
-                        db.commit()
-                        db.refresh(job)
-                        scan_id = job.id
+                        scan_id = scanner_service.create_scan_job(year, phone_number=chat_id)
 
                         # Update conversation state
                         conv.current_state = "processing"
