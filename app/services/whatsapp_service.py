@@ -160,8 +160,7 @@ class WhatsAppService:
             f"📊 *IPO Breakout Scan Completed*\n\n"
             f"📅 Year: *{summary.get('year')}*\n"
             f"🔍 Stocks Scanned: *{summary.get('total_scanned', 0)}*\n"
-            f"✅ Qualified Stocks: *{summary.get('qualified_count', 0)}*\n"
-            f"📈 Qualification Rate: *{summary.get('qualification_pct', 0):.1f}%*\n\n"
+            f"✅ Qualified Stocks: *{summary.get('qualified_count', 0)}*\n\n"
         )
 
         if top_list:

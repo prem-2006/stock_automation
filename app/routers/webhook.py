@@ -216,8 +216,7 @@ async def whatsapp_webhook(
                         resp.message(
                             f"🔍 *Scanning IPO year {year}...*\n\n"
                             f"⏳ This may take a few minutes depending on the number of stocks.\n"
-                            f"I'll send you the results with an Excel report once done.\n\n"
-                            f"Scan ID: `{scan_id[:8]}`"
+                            f"I'll send you the results with an Excel report once done."
                         )
                         thread = threading.Thread(
                             target=_process_scan_and_notify,

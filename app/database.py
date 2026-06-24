@@ -4,7 +4,7 @@ Handles engine creation, session management, and table initialization.
 """
 
 import os
-from sqlalchemy import create_engine, event
+from sqlalchemy import create_engine, event, text
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import sessionmaker, Session, declarative_base
 from app.config import get_settings
@@ -84,7 +84,15 @@ def init_db():
 
     engine = get_engine()
     Base.metadata.create_all(bind=engine)
-    logger.info("Database tables created successfully")
+    
+    # Auto-migrate: Add previous_month_close if it doesn't exist
+    try:
+        with engine.begin() as conn:
+            conn.execute(text("ALTER TABLE scan_results ADD COLUMN previous_month_close FLOAT"))
+    except Exception:
+        pass  # Column already exists or table not created yet
+        
+    logger.info("Database tables created/updated successfully")
 
 
 def drop_db():
