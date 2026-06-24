@@ -55,7 +55,7 @@ async def lifespan(app: FastAPI):
     init_db()
     logger.info("Database initialized")
     logger.info(f"Environment: {'Vercel Serverless' if IS_VERCEL else 'Traditional Server'}")
-    logger.info(f"Twilio configured: {bool(settings.TWILIO_ACCOUNT_SID)}")
+    logger.info(f"Telegram Bot configured: {bool(settings.TELEGRAM_BOT_TOKEN)}")
     logger.info("Application startup complete")
 
     yield
