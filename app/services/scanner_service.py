@@ -112,16 +112,22 @@ class ScannerService:
             # Step 3: Save results to database
             qualified_results = []
             for result in results:
+                import math
+                def safe_float(v):
+                    if v is None or pd.isna(v) or math.isnan(v):
+                        return None
+                    return float(v)
+
                 scan_result = ScanResult(
                     scan_id=scan_id,
                     symbol=result["symbol"],
                     company_name=result["company_name"],
                     ipo_year=year,
-                    ipo_first_month_high=result.get("ipo_first_month_high"),
+                    ipo_first_month_high=safe_float(result.get("ipo_first_month_high")),
                     breakout_month=result.get("breakout_month"),
-                    breakout_close=result.get("breakout_close"),
-                    current_price=result.get("current_price"),
-                    pct_above_ipo_high=result.get("pct_above_ipo_high"),
+                    breakout_close=safe_float(result.get("breakout_close")),
+                    current_price=safe_float(result.get("current_price")),
+                    pct_above_ipo_high=safe_float(result.get("pct_above_ipo_high")),
                     listing_date=result.get("listing_date"),
                     qualified=result.get("qualified", False),
                 )
@@ -157,6 +163,7 @@ class ScannerService:
             return self._build_summary(job, qualified_results)
 
         except Exception as e:
+            session.rollback()  # Rollback the failed transaction first
             logger.error(f"Scan failed for job {scan_id}: {e}", exc_info=True)
             job = session.query(ScanJob).filter_by(id=scan_id).first()
             if job:
