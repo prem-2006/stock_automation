@@ -431,8 +431,6 @@ class ScannerService:
             reverse=True,
         )
 
-        top_10 = sorted_qualified[:10]
-
         qualification_pct = 0.0
         total = job.total_stocks or 0
         if total > 0:
@@ -448,7 +446,7 @@ class ScannerService:
             "qualified_count": len(qualified_results),
             "qualification_pct": qualification_pct,
             "report_path": job.report_path,
-            "top_10": top_10,
+            "qualified_list": sorted_qualified,
         }
 
     def get_scan_status(self, scan_id: str) -> Optional[Dict]:

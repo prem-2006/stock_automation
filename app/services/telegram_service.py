@@ -96,9 +96,9 @@ class TelegramService:
         Returns:
             Formatted message string
         """
-        top_stocks = summary.get("top_10", [])
+        qualified_stocks = summary.get("qualified_list", [])
         top_list = ""
-        for i, stock in enumerate(top_stocks[:10], 1):
+        for i, stock in enumerate(qualified_stocks, 1):
             symbol = stock.get("symbol", "N/A")
             pct = stock.get("pct_above_ipo_high", 0) or 0
             top_list += f"{i}. <b>{symbol}</b> ({pct:+.1f}%)\n"
@@ -111,7 +111,7 @@ class TelegramService:
         )
 
         if top_list:
-            message += f"🏆 <b>Top Results:</b>\n{top_list}\n"
+            message += f"🏆 <b>Qualified Stocks:</b>\n{top_list}\n"
 
         message += "📎 Excel report attached below."
 

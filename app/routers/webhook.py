@@ -90,9 +90,7 @@ def _process_scan_and_notify(scan_id: str, chat_id: str) -> None:
 
         # Generate Excel report
         try:
-            from app.services.excel_service import ExcelService
-            excel_service = ExcelService()
-            report_path = excel_service.generate_report(scan_id)
+            report_path = summary.get("report_path")
 
             if report_path and os.path.exists(report_path):
                 # Send document + caption
