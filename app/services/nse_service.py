@@ -148,11 +148,7 @@ class NSEService:
             logger.error("No listing date column found in equity data")
             return []
 
-        # Only include EQ series (regular equity)
-        if "SERIES" in df.columns:
-            filtered = filtered[filtered["SERIES"].str.strip() == "EQ"]
-        elif " SERIES" in df.columns:
-            filtered = filtered[filtered[" SERIES"].str.strip() == "EQ"]
+        # We do not filter by SERIES anymore, so all stocks (including SME IPOs) are scanned.
 
         stocks = []
         for _, row in filtered.iterrows():

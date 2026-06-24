@@ -144,18 +144,18 @@ class TestNSEDataProcessing:
         assert len(filtered) == 2
         assert list(filtered["SYMBOL"]) == ["AAA", "BBB"]
 
-    def test_series_filtering(self):
-        """Test that only EQ series stocks are included."""
+    def test_no_series_filtering(self):
+        """Test that all series stocks are included (SME, BE, EQ)."""
         data = pd.DataFrame(
             {
                 "SYMBOL": ["AAA", "BBB", "CCC"],
-                "SERIES": ["EQ", "BE", "EQ"],
+                "SERIES": ["EQ", "BE", "SM"],
                 "IPO_YEAR": [2020, 2020, 2020],
             }
         )
 
-        filtered = data[(data["IPO_YEAR"] == 2020) & (data["SERIES"].str.strip() == "EQ")]
-        assert len(filtered) == 2
+        filtered = data[data["IPO_YEAR"] == 2020]
+        assert len(filtered) == 3
 
 
 if __name__ == "__main__":
