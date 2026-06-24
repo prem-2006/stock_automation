@@ -1,12 +1,9 @@
 """
-WhatsApp Webhook Router.
+Telegram Webhook Router.
 
-Handles incoming Twilio WhatsApp messages and manages conversation state.
+Handles incoming Telegram messages and manages conversation state.
 Implements a state machine for the chat flow:
   idle → awaiting_year → processing → completed
-
-Compatible with Vercel serverless (synchronous) and traditional servers (background threads).
-Fully hardened — no unhandled exceptions will crash the bot.
 """
 
 import os
@@ -15,36 +12,38 @@ import traceback
 from datetime import datetime, UTC
 from typing import Optional
 
-from fastapi import APIRouter, Form, Request, Response, Depends, HTTPException
+from fastapi import APIRouter, Request, Depends, BackgroundTasks
+from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session
 
-from app.database import get_db
+from app.database import get_db, get_session_factory
 from app.models import Conversation, ScanJob
 from app.services.scanner_service import ScannerService
-from app.services.whatsapp_service import WhatsAppService
+from app.services.telegram_service import TelegramService
 from app.config import get_settings
 from app.utils.logger import get_logger
 
 logger = get_logger("webhook")
 
-router = APIRouter(prefix="/webhook", tags=["WhatsApp"])
+router = APIRouter(tags=["Telegram"])
 
 # Service instances
 scanner_service = ScannerService()
-whatsapp_service = WhatsAppService()
+telegram_service = TelegramService()
 
 # Detect Vercel
 IS_VERCEL = os.environ.get("VERCEL", "") == "1" or os.environ.get("VERCEL_ENV") is not None
 
 
-def _get_or_create_conversation(db: Session, phone_number: str) -> Conversation:
+def _get_or_create_conversation(db: Session, chat_id: str) -> Conversation:
     """Get existing conversation or create a new one. Never crashes."""
     try:
-        conv = db.query(Conversation).filter_by(phone_number=phone_number).first()
+        conv = db.query(Conversation).filter_by(phone_number=chat_id).first()
         if not conv:
             conv = Conversation(
-                phone_number=phone_number,
+                phone_number=chat_id,
                 current_state="idle",
+                created_at=datetime.now(UTC),
                 last_message_at=datetime.now(UTC),
             )
             db.add(conv)
@@ -52,121 +51,97 @@ def _get_or_create_conversation(db: Session, phone_number: str) -> Conversation:
             db.refresh(conv)
         return conv
     except Exception as e:
-        logger.error(f"Failed to get/create conversation for {phone_number}: {e}")
+        logger.error(f"Failed to get/create conversation for {chat_id}: {e}")
         db.rollback()
-        # Create in-memory conversation as fallback
-        conv = Conversation(
-            phone_number=phone_number,
-            current_state="idle",
-            last_message_at=datetime.now(UTC),
-        )
-        try:
-            db.add(conv)
-            db.commit()
-            db.refresh(conv)
-        except Exception:
-            db.rollback()
-        return conv
+        # Fallback in-memory object so we don't crash the handler
+        return Conversation(phone_number=chat_id, current_state="idle")
 
 
-def _process_scan_and_notify(scan_id: str, phone_number: str):
-    """Run the scan and send results via WhatsApp. Never crashes."""
+def _update_conversation_state(chat_id: str, state: str, scan_id: str = None) -> None:
+    """Update conversation state safely."""
     try:
-        logger.info(f"Scan started: {scan_id}")
-        summary = scanner_service.run_scan(scan_id)
-
-        # Send results via WhatsApp
-        message = whatsapp_service.format_scan_summary(summary)
-
-        report_path = summary.get("report_path")
-        if report_path and not IS_VERCEL:
-            settings = get_settings()
-            filename = report_path.replace("\\", "/").split("/")[-1]
-            media_url = f"{settings.BASE_URL}/reports/{filename}"
-
-            try:
-                whatsapp_service.send_message_with_attachment(
-                    to=phone_number,
-                    body=message,
-                    media_url=media_url,
-                )
-            except Exception as e:
-                logger.error(f"Failed to send attachment, sending text only: {e}")
-                whatsapp_service.send_message(to=phone_number, body=message)
-        else:
-            whatsapp_service.send_message(to=phone_number, body=message)
-
-        # Update conversation state
-        _update_conversation_state(phone_number, "completed")
-
-        logger.info(f"Scan completed and results sent: {scan_id}")
-
-    except Exception as e:
-        logger.error(f"Scan failed: {scan_id} — {e}", exc_info=True)
-
-        # Notify user of failure — but protect against notification failure too
-        try:
-            whatsapp_service.send_message(
-                to=phone_number,
-                body=(
-                    f"❌ Sorry, the scan failed due to an error.\n\n"
-                    f"Please try again by sending 'Hi'."
-                ),
-            )
-        except Exception as notify_err:
-            logger.error(f"Failed to send error notification: {notify_err}")
-
-        # Reset conversation state
-        _update_conversation_state(phone_number, "idle")
-
-
-def _update_conversation_state(phone_number: str, new_state: str):
-    """Safely update conversation state in a fresh session. Never crashes."""
-    try:
-        from app.database import get_session_factory
         SessionLocal = get_session_factory()
-        session = SessionLocal()
-        try:
-            conv = session.query(Conversation).filter_by(phone_number=phone_number).first()
+        with SessionLocal() as db:
+            conv = db.query(Conversation).filter_by(phone_number=chat_id).first()
             if conv:
-                conv.current_state = new_state
-                conv.current_scan_id = None
-                session.commit()
-        except Exception as e:
-            logger.error(f"Failed to update conversation state: {e}")
-            session.rollback()
-        finally:
-            session.close()
+                conv.current_state = state
+                if scan_id:
+                    conv.current_scan_id = scan_id
+                db.commit()
     except Exception as e:
         logger.error(f"Failed to get session for conversation update: {e}")
 
 
-@router.post("/whatsapp")
-async def whatsapp_webhook(
+def _process_scan_and_notify(scan_id: str, chat_id: str) -> None:
+    """
+    Background worker:
+    1. Runs the scan (which saves to DB).
+    2. Builds the Excel report.
+    3. Sends the Telegram notification + file.
+    """
+    try:
+        logger.info(f"Background scan started for job {scan_id}")
+
+        # Run scan
+        summary = scanner_service.run_scan(scan_id)
+
+        # Format summary message
+        message = telegram_service.format_scan_summary(summary)
+
+        # Generate Excel report
+        try:
+            from app.services.excel_service import ExcelService
+            excel_service = ExcelService()
+            report_path = excel_service.generate_report(scan_id)
+
+            if report_path and os.path.exists(report_path):
+                # Send document + caption
+                telegram_service.send_document(int(chat_id), report_path, message)
+            else:
+                raise Exception("Report path is empty or file doesn't exist")
+
+        except Exception as e:
+            logger.error(f"Failed to attach report for scan {scan_id}: {e}")
+            telegram_service.send_message(int(chat_id), message + f"\n\n⚠️ Failed to generate Excel report: {e}")
+
+    except Exception as notify_err:
+        logger.error(f"Failed to send error notification: {notify_err}")
+
+    finally:
+        # Reset conversation state
+        _update_conversation_state(chat_id, "idle")
+
+
+@router.post("/webhook/telegram")
+async def telegram_webhook(
     request: Request,
-    Body: str = Form(""),
-    From: str = Form(""),
-    To: str = Form(""),
-    MessageSid: str = Form(""),
+    background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
 ):
     """
-    Handle incoming WhatsApp messages from Twilio.
-
-    This entire handler is wrapped in a top-level try/catch so that
-    the user ALWAYS gets a response, even if something unexpected fails.
+    Handle incoming Telegram messages via Webhook.
+    Returns 200 OK immediately so Telegram doesn't retry.
     """
-    from twilio.twiml.messaging_response import MessagingResponse
-
-    phone_number = From
-    resp = MessagingResponse()
-
     try:
-        message_body = Body.strip().lower()
-        logger.info(f"Received WhatsApp from {phone_number}: '{Body.strip()}'")
+        update = await request.json()
+        logger.debug(f"Telegram Update: {update}")
+        
+        # Only process regular messages
+        if "message" not in update:
+            return JSONResponse({"status": "ok"})
+            
+        message = update["message"]
+        
+        if "text" not in message or "chat" not in message:
+            return JSONResponse({"status": "ok"})
+            
+        chat_id = str(message["chat"]["id"])
+        text = message["text"].strip().lower()
+        
+        logger.info(f"Received Telegram from {chat_id}: '{text}'")
 
         # Get or create conversation
-        conv = _get_or_create_conversation(db, phone_number)
+        conv = _get_or_create_conversation(db, chat_id)
         conv.last_message_at = datetime.now(UTC)
         try:
             db.commit()
@@ -174,7 +149,7 @@ async def whatsapp_webhook(
             db.rollback()
 
         # State machine logic
-        if message_body in ("hi", "hello", "hey", "start", "menu", "help"):
+        if text in ("hi", "hello", "hey", "start", "menu", "help", "/start"):
             # Reset to greeting state
             conv.current_state = "awaiting_year"
             conv.current_scan_id = None
@@ -183,125 +158,99 @@ async def whatsapp_webhook(
             except Exception:
                 db.rollback()
 
-            resp.message(
-                "👋 Welcome to the *IPO Breakout Scanner*!\n\n"
-                "This bot screens NSE-listed stocks by IPO year and identifies stocks "
-                "that broke above their first-month listing high.\n\n"
-                "📅 *Enter IPO Year* (Example: 2018)"
+            telegram_service.send_message(
+                int(chat_id),
+                "👋 Welcome to the <b>IPO Breakout Scanner</b>!\n\n"
+                "To get started, please tell me the IPO year you want to scan.\n\n"
+                "📅 <b>Enter IPO Year</b> (Example: 2020)"
             )
 
         elif conv.current_state == "awaiting_year":
-            # Try to parse year
-            try:
-                year = int(Body.strip())
-                if 1990 <= year <= datetime.now().year:
-                    # Valid year — start scanning
-                    conv.current_state = "processing"
+            # Expecting a year
+            if not text.isdigit() or len(text) != 4:
+                telegram_service.send_message(
+                    int(chat_id),
+                    "❌ Invalid year format.\n\n"
+                    "Please enter a valid 4-digit year (e.g., 2021)."
+                )
+            else:
+                year = int(text)
+                current_year = datetime.now().year
 
-                    # Create scan job
-                    scan_id = scanner_service.create_scan_job(year, phone_number=phone_number)
-                    conv.current_scan_id = scan_id
+                if year < 2000 or year > current_year:
+                    telegram_service.send_message(
+                        int(chat_id),
+                        f"❌ Year must be between 2000 and {current_year}."
+                    )
+                else:
+                    # Valid year, create scan job
                     try:
-                        db.commit()
-                    except Exception:
-                        db.rollback()
-
-                    if IS_VERCEL:
-                        resp.message(
-                            f"🔍 *Scanning IPO year {year}...*\n\n"
-                            f"⏳ Processing now. Results will be sent shortly."
+                        job = ScanJob(
+                            year=year,
+                            status="pending",
+                            created_at=datetime.now(UTC),
                         )
-                        _process_scan_and_notify(scan_id, phone_number)
-                    else:
-                        resp.message(
-                            f"🔍 *Scanning IPO year {year}...*\n\n"
+                        db.add(job)
+                        db.commit()
+                        db.refresh(job)
+                        scan_id = job.id
+
+                        # Update conversation state
+                        conv.current_state = "processing"
+                        conv.current_scan_id = scan_id
+                        db.commit()
+                        
+                        telegram_service.send_message(
+                            int(chat_id),
+                            f"🔍 <b>Scanning IPO year {year}...</b>\n\n"
                             f"⏳ This may take a few minutes depending on the number of stocks.\n"
                             f"I'll send you the results with an Excel report once done."
                         )
-                        thread = threading.Thread(
-                            target=_process_scan_and_notify,
-                            args=(scan_id, phone_number),
-                            daemon=True,
-                        )
-                        thread.start()
-                else:
-                    resp.message(
-                        f"⚠️ Please enter a valid year between 1990 and {datetime.now().year}.\n\n"
-                        f"📅 *Enter IPO Year* (Example: 2018)"
-                    )
-            except ValueError:
-                resp.message(
-                    "⚠️ That doesn't look like a valid year.\n\n"
-                    "📅 *Enter IPO Year* (Example: 2018)"
-                )
 
-        elif conv.current_state == "processing":
-            # Scan is already running
-            scan_id = conv.current_scan_id
-            if scan_id:
-                try:
-                    status = scanner_service.get_scan_status(scan_id)
-                except Exception:
-                    status = None
+                        if IS_VERCEL:
+                            # On Vercel, we can't spawn threads reliably, so we use BackgroundTasks
+                            background_tasks.add_task(_process_scan_and_notify, scan_id, chat_id)
+                        else:
+                            # Standard server: spawn a daemon thread
+                            thread = threading.Thread(
+                                target=_process_scan_and_notify,
+                                args=(scan_id, chat_id),
+                                daemon=True,
+                            )
+                            thread.start()
 
-                if status:
-                    if status.get("status") == "completed":
-                        conv.current_state = "completed"
-                        try:
-                            db.commit()
-                        except Exception:
-                            db.rollback()
-                        resp.message(
-                            "✅ Your scan is complete!\n\n"
-                            "Would you like to scan another year?\n\n"
-                            "📅 *Enter IPO Year* (Example: 2020)"
+                    except Exception as e:
+                        logger.error(f"Error starting scan: {e}")
+                        db.rollback()
+                        telegram_service.send_message(
+                            int(chat_id),
+                            "❌ Failed to start the scan. Please try again."
                         )
-                    elif status.get("status") == "failed":
                         conv.current_state = "idle"
                         try:
                             db.commit()
-                        except Exception:
+                        except:
                             db.rollback()
-                        resp.message(
-                            "❌ Your previous scan encountered an issue.\n\n"
-                            "Send *Hi* to start a fresh scan."
-                        )
-                    else:
-                        progress = ""
-                        if status.get("total_stocks", 0) > 0:
-                            progress = (
-                                f"\n📊 Progress: {status.get('scanned_stocks', 0)}"
-                                f"/{status.get('total_stocks', 0)} stocks scanned"
-                            )
-                        resp.message(
-                            f"⏳ Your scan is still in progress.{progress}\n\n"
-                            f"Please wait — I'll send the results automatically when done."
-                        )
-                else:
-                    resp.message("⏳ Your scan is being processed. Please wait...")
-            else:
-                conv.current_state = "idle"
-                try:
-                    db.commit()
-                except Exception:
-                    db.rollback()
-                resp.message(
-                    "Something went wrong. Let's start over.\n\n"
-                    "Send *Hi* to begin a new scan."
-                )
+
+        elif conv.current_state == "processing":
+            telegram_service.send_message(
+                int(chat_id),
+                "⏳ Your previous scan is still running.\n\n"
+                "Please wait for it to finish. You'll receive the report shortly!"
+            )
 
         elif conv.current_state == "completed":
-            # Offer to scan again
             conv.current_state = "awaiting_year"
             try:
                 db.commit()
             except Exception:
                 db.rollback()
 
-            resp.message(
+            telegram_service.send_message(
+                int(chat_id),
                 "✅ Your last scan is complete!\n\n"
                 "Would you like to scan another year?\n\n"
-                "📅 *Enter IPO Year* (Example: 2020)"
+                "📅 <b>Enter IPO Year</b> (Example: 2020)"
             )
 
         else:
@@ -312,9 +261,10 @@ async def whatsapp_webhook(
             except Exception:
                 db.rollback()
 
-            resp.message(
-                "👋 Welcome to the *IPO Breakout Scanner*!\n\n"
-                "📅 *Enter IPO Year* (Example: 2018)"
+            telegram_service.send_message(
+                int(chat_id),
+                "👋 Welcome to the <b>IPO Breakout Scanner</b>!\n\n"
+                "📅 <b>Enter IPO Year</b> (Example: 2018)"
             )
 
         # Final commit for any remaining changes
@@ -324,11 +274,7 @@ async def whatsapp_webhook(
             db.rollback()
 
     except Exception as e:
-        # TOP-LEVEL CATCH: If ANYTHING crashes, always reply gracefully
         logger.error(f"CRITICAL: Webhook handler crashed: {e}", exc_info=True)
-        resp = MessagingResponse()  # Fresh response in case the old one is corrupt
-        resp.message(
-            "⚠️ Something unexpected happened. Please try again by sending *Hi*."
-        )
 
-    return Response(content=str(resp), media_type="application/xml")
+    # Always return 200 OK so Telegram doesn't retry
+    return JSONResponse({"status": "ok"})

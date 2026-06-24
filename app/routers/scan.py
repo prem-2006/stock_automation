@@ -20,7 +20,6 @@ from fastapi.responses import FileResponse
 
 from app.schemas import ScanRequest, ScanJobResponse, HealthResponse
 from app.services.scanner_service import ScannerService
-from app.services.whatsapp_service import WhatsAppService
 from app.utils.logger import get_logger
 
 logger = get_logger("scan_router")
@@ -28,7 +27,6 @@ logger = get_logger("scan_router")
 router = APIRouter(tags=["Scan"])
 
 scanner_service = ScannerService()
-whatsapp_service = WhatsAppService()
 
 # Detect Vercel
 IS_VERCEL = os.environ.get("VERCEL", "") == "1" or os.environ.get("VERCEL_ENV") is not None

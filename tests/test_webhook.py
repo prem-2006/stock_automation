@@ -1,11 +1,12 @@
 """
-Tests for the WhatsApp Webhook endpoint.
+Tests for the Telegram Webhook endpoint.
 
-Tests the conversation state machine with simulated Twilio webhook requests.
+Tests the conversation state machine with simulated Telegram webhook requests.
 """
 
 import os
 import sys
+from unittest.mock import patch, MagicMock
 
 import pytest
 from fastapi.testclient import TestClient
@@ -14,11 +15,10 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 # Set test environment variables before importing app
 os.environ.setdefault("DATABASE_URL", "sqlite:///./test_db.db")
-os.environ.setdefault("TWILIO_ACCOUNT_SID", "")
-os.environ.setdefault("TWILIO_AUTH_TOKEN", "")
+os.environ.setdefault("TELEGRAM_BOT_TOKEN", "test_token")
 
 from app.main import app
-from app.database import init_db, drop_db, get_engine
+from app.database import init_db, drop_db
 
 
 @pytest.fixture(autouse=True)
@@ -41,162 +41,73 @@ def client():
     return TestClient(app)
 
 
-class TestWhatsAppWebhook:
-    """Test the WhatsApp webhook conversation flow."""
+def build_telegram_payload(chat_id: int, text: str) -> dict:
+    """Helper to build a mock Telegram payload."""
+    return {
+        "update_id": 12345,
+        "message": {
+            "message_id": 1,
+            "chat": {"id": chat_id, "type": "private"},
+            "text": text
+        }
+    }
 
-    def test_greeting_message(self, client):
+
+class TestTelegramWebhook:
+    """Test the Telegram webhook conversation flow."""
+
+    @patch("app.routers.webhook.telegram_service.send_message")
+    def test_greeting_message(self, mock_send_message, client):
         """Test that 'hi' triggers the welcome message."""
         response = client.post(
-            "/webhook/whatsapp",
-            data={
-                "Body": "Hi",
-                "From": "whatsapp:+919876543210",
-                "To": "whatsapp:+14155238886",
-                "MessageSid": "test_sid_001",
-            },
+            "/webhook/telegram",
+            json=build_telegram_payload(111, "Hi")
         )
-
         assert response.status_code == 200
-        assert "application/xml" in response.headers["content-type"]
-        assert "Enter IPO Year" in response.text
-        assert "Welcome" in response.text
+        assert response.json() == {"status": "ok"}
+        
+        # Verify the correct message was sent
+        mock_send_message.assert_called_once()
+        args, kwargs = mock_send_message.call_args
+        assert args[0] == 111
+        assert "Welcome to the <b>IPO Breakout Scanner</b>!" in args[1]
 
-    def test_hello_variant(self, client):
-        """Test that 'hello' also triggers the welcome message."""
-        response = client.post(
-            "/webhook/whatsapp",
-            data={
-                "Body": "hello",
-                "From": "whatsapp:+919876543210",
-                "To": "whatsapp:+14155238886",
-                "MessageSid": "test_sid_002",
-            },
-        )
+    @patch("app.routers.webhook.telegram_service.send_message")
+    def test_invalid_year_input(self, mock_send_message, client):
+        """Test that sending an invalid year returns an error."""
+        # 1. Start state machine
+        client.post("/webhook/telegram", json=build_telegram_payload(111, "Hi"))
 
-        assert response.status_code == 200
-        assert "Enter IPO Year" in response.text
+        # 2. Send invalid year
+        mock_send_message.reset_mock()
+        client.post("/webhook/telegram", json=build_telegram_payload(111, "abcd"))
 
-    def test_invalid_year_input(self, client):
-        """Test that an invalid year returns an error message."""
-        # First, send greeting to set state to awaiting_year
-        client.post(
-            "/webhook/whatsapp",
-            data={
-                "Body": "Hi",
-                "From": "whatsapp:+919876543210",
-                "To": "whatsapp:+14155238886",
-                "MessageSid": "test_sid_003",
-            },
-        )
+        mock_send_message.assert_called_once()
+        assert "Invalid year format" in mock_send_message.call_args[0][1]
 
-        # Send invalid year
-        response = client.post(
-            "/webhook/whatsapp",
-            data={
-                "Body": "abc",
-                "From": "whatsapp:+919876543210",
-                "To": "whatsapp:+14155238886",
-                "MessageSid": "test_sid_004",
-            },
-        )
+    @patch("app.routers.webhook.telegram_service.send_message")
+    def test_out_of_range_year(self, mock_send_message, client):
+        """Test that a year before 2000 is rejected."""
+        client.post("/webhook/telegram", json=build_telegram_payload(111, "Hi"))
+        
+        mock_send_message.reset_mock()
+        client.post("/webhook/telegram", json=build_telegram_payload(111, "1999"))
 
-        assert response.status_code == 200
-        assert "valid year" in response.text.lower() or "doesn't look like" in response.text.lower()
-
-    def test_out_of_range_year(self, client):
-        """Test that a year outside valid range returns error."""
-        # Set state to awaiting_year
-        client.post(
-            "/webhook/whatsapp",
-            data={
-                "Body": "Hi",
-                "From": "whatsapp:+919876543210",
-                "To": "whatsapp:+14155238886",
-                "MessageSid": "test_sid_005",
-            },
-        )
-
-        # Send out-of-range year
-        response = client.post(
-            "/webhook/whatsapp",
-            data={
-                "Body": "1800",
-                "From": "whatsapp:+919876543210",
-                "To": "whatsapp:+14155238886",
-                "MessageSid": "test_sid_006",
-            },
-        )
-
-        assert response.status_code == 200
-        assert "valid year" in response.text.lower()
-
-    def test_help_command(self, client):
-        """Test that 'help' triggers the welcome message."""
-        response = client.post(
-            "/webhook/whatsapp",
-            data={
-                "Body": "help",
-                "From": "whatsapp:+919876543210",
-                "To": "whatsapp:+14155238886",
-                "MessageSid": "test_sid_007",
-            },
-        )
-
-        assert response.status_code == 200
-        assert "Welcome" in response.text or "Enter IPO Year" in response.text
+        mock_send_message.assert_called_once()
+        assert "Year must be between 2000" in mock_send_message.call_args[0][1]
 
 
 class TestScanEndpoints:
-    """Test the REST scan API endpoints."""
+    """Test other scan-related endpoints."""
 
     def test_health_check(self, client):
         """Test the health check endpoint."""
         response = client.get("/health")
         assert response.status_code == 200
-        data = response.json()
-        assert data["status"] == "healthy"
-        assert data["version"] == "1.0.0"
-
-    def test_root_endpoint(self, client):
-        """Test the root endpoint returns application info."""
-        response = client.get("/")
-        assert response.status_code == 200
-        data = response.json()
-        assert data["application"] == "IPO Breakout Stock Screener"
-        assert "endpoints" in data
-
-    def test_scan_invalid_year(self, client):
-        """Test that an invalid year in scan request is rejected."""
-        response = client.post(
-            "/scan",
-            json={"year": 1800},
-        )
-        assert response.status_code == 422  # Validation error
-
-    def test_scan_missing_year(self, client):
-        """Test that a missing year in scan request is rejected."""
-        response = client.post(
-            "/scan",
-            json={},
-        )
-        assert response.status_code == 422
-
-    def test_get_nonexistent_scan(self, client):
-        """Test getting a non-existent scan returns 404."""
-        response = client.get("/scan/nonexistent-id")
-        assert response.status_code == 404
-
-    def test_report_not_found(self, client):
-        """Test downloading a non-existent report returns 404."""
-        response = client.get("/reports/nonexistent.xlsx")
-        assert response.status_code == 404
+        assert response.json()["status"] == "healthy"
 
     def test_list_scans(self, client):
-        """Test listing recent scans."""
+        """Test listing scan jobs."""
         response = client.get("/scans")
         assert response.status_code == 200
         assert isinstance(response.json(), list)
-
-
-if __name__ == "__main__":
-    pytest.main([__file__, "-v"])

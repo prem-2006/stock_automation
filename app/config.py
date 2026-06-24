@@ -7,7 +7,8 @@ Compatible with Vercel serverless (uses /tmp for writable paths).
 
 import os
 from functools import lru_cache
-from pydantic_settings import BaseSettings
+from pydantic import Field
+from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # Detect Vercel environment
 IS_VERCEL = os.environ.get("VERCEL", "") == "1" or os.environ.get("VERCEL_ENV") is not None
@@ -15,11 +16,12 @@ IS_VERCEL = os.environ.get("VERCEL", "") == "1" or os.environ.get("VERCEL_ENV") 
 
 class Settings(BaseSettings):
     """Application settings loaded from environment variables."""
+    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
-    # --- Twilio ---
-    TWILIO_ACCOUNT_SID: str = ""
-    TWILIO_AUTH_TOKEN: str = ""
-    TWILIO_WHATSAPP_NUMBER: str = "whatsapp:+14155238886"
+    # --- Telegram Bot Config ---
+    TELEGRAM_BOT_TOKEN: str = Field(
+        "", description="Telegram Bot Token"
+    )
 
     # --- Server ---
     BASE_URL: str = "http://localhost:8000"
