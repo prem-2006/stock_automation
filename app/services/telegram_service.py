@@ -44,10 +44,16 @@ class TelegramService:
         }
 
         try:
-            # We use httpx synchronously here for simplicity, though async is preferred for high-throughput
+            # Telegram message limit is 4096 characters. We chunk at 4000 to be safe.
+            max_len = 4000
+            chunks = [text[i:i+max_len] for i in range(0, len(text), max_len)]
+            
             with httpx.Client() as client:
-                resp = client.post(url, json=payload, timeout=10.0)
-                resp.raise_for_status()
+                for chunk in chunks:
+                    payload["text"] = chunk
+                    resp = client.post(url, json=payload, timeout=10.0)
+                    resp.raise_for_status()
+                
                 logger.info(f"Telegram message sent to {chat_id}")
                 return True
         except Exception as e:

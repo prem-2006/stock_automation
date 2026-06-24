@@ -93,11 +93,14 @@ def _process_scan_and_notify(scan_id: str, chat_id: str) -> None:
             report_path = summary.get("report_path")
 
             if report_path and os.path.exists(report_path):
-                # Send document + caption
-                telegram_service.send_document(int(chat_id), report_path, message)
+                # Send the long text message first
+                telegram_service.send_message(int(chat_id), message)
+                # Send the document separately with a short caption
+                telegram_service.send_document(int(chat_id), report_path, "📎 Your detailed Excel report")
             else:
-                raise Exception("Report path is empty or file doesn't exist")
-
+                # Fallback if report failed
+                telegram_service.send_message(int(chat_id), message)
+                
         except Exception as e:
             logger.error(f"Failed to attach report for scan {scan_id}: {e}")
             telegram_service.send_message(int(chat_id), message + f"\n\n⚠️ Failed to generate Excel report: {e}")
