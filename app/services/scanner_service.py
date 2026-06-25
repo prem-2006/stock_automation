@@ -378,10 +378,11 @@ class ScannerService:
             if result["listing_date"] is None:
                 result["listing_date"] = monthly_data.index[0]
 
-            # Step 2: Check if previous month close < first month high
+            # Step 2: Check if previous month close < first month high AND current price >= first month high
             prev_close = result.get("previous_month_close")
-            if prev_close is not None and prev_close < first_month_high:
-                result["qualified"] = True
+            if prev_close is not None and current_price is not None:
+                if prev_close < first_month_high and current_price >= first_month_high:
+                    result["qualified"] = True
                 try:
                     result["breakout_month"] = monthly_data.index[-2].strftime("%Y-%m")
                 except Exception:

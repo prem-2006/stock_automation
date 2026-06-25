@@ -19,6 +19,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 def _create_mock_monthly_data(
     first_month_high: float = 100.0,
     breakout_close: float = 120.0,
+    current_price: float = None,
     months: int = 12,
     has_breakout: bool = True,
 ):
@@ -37,7 +38,7 @@ def _create_mock_monthly_data(
         # Set breakout on the previous month
         data["Close"][-2] = breakout_close
         # Set current price
-        data["Close"][-1] = breakout_close * 1.1
+        data["Close"][-1] = current_price if current_price is not None else breakout_close * 1.1
 
     df = pd.DataFrame(data, index=dates)
     return df
@@ -51,6 +52,7 @@ class TestScannerLogic:
         data = _create_mock_monthly_data(
             first_month_high=100.0,
             breakout_close=80.0,
+            current_price=110.0,
             months=12,
             has_breakout=True,
         )
@@ -60,7 +62,8 @@ class TestScannerLogic:
         assert first_month_high == 100.0
 
         # Check breakout condition
-        qualified = prev_close < first_month_high
+        current_price = float(data["Close"].iloc[-1])
+        qualified = prev_close < first_month_high and current_price >= first_month_high
         
         assert qualified is True
 
@@ -76,7 +79,8 @@ class TestScannerLogic:
         first_month_high = float(data["High"].iloc[0])
         prev_close = float(data["Close"].iloc[-2])
 
-        qualified = prev_close < first_month_high
+        current_price = float(data["Close"].iloc[-1])
+        qualified = prev_close < first_month_high and current_price >= first_month_high
 
         assert qualified is False
 
