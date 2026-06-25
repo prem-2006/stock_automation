@@ -149,6 +149,20 @@ class ScannerService:
 
             for result in results:
                 try:
+                    # Convert listing_date to native python datetime for SQLite
+                    listing_date_raw = result.get("listing_date")
+                    listing_date_py = None
+                    if listing_date_raw is not None:
+                        try:
+                            if isinstance(listing_date_raw, str):
+                                listing_date_py = pd.to_datetime(listing_date_raw).to_pydatetime()
+                            elif hasattr(listing_date_raw, "to_pydatetime"):
+                                listing_date_py = listing_date_raw.to_pydatetime()
+                            else:
+                                listing_date_py = listing_date_raw
+                        except Exception:
+                            pass
+
                     scan_result = ScanResult(
                         scan_id=scan_id,
                         symbol=result.get("symbol", "UNKNOWN"),
@@ -160,7 +174,7 @@ class ScannerService:
                         previous_month_close=safe_round(result.get("previous_month_close")),
                         current_price=safe_round(result.get("current_price")),
                         pct_above_ipo_high=safe_round(result.get("pct_above_ipo_high")),
-                        listing_date=result.get("listing_date"),
+                        listing_date=listing_date_py,
                         qualified=bool(result.get("qualified", False)),
                     )
                     session.add(scan_result)

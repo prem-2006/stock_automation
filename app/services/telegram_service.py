@@ -44,9 +44,24 @@ class TelegramService:
         }
 
         try:
-            # Telegram message limit is 4096 characters. We chunk at 4000 to be safe.
+            # Telegram message limit is 4096 characters.
+            # Chunk safely by lines to avoid breaking HTML tags.
             max_len = 4000
-            chunks = [text[i:i+max_len] for i in range(0, len(text), max_len)]
+            chunks = []
+            
+            if len(text) <= max_len:
+                chunks.append(text)
+            else:
+                current_chunk = ""
+                for line in text.split('\n'):
+                    if len(current_chunk) + len(line) + 1 > max_len:
+                        if current_chunk:
+                            chunks.append(current_chunk)
+                        current_chunk = line + "\n"
+                    else:
+                        current_chunk += line + "\n"
+                if current_chunk:
+                    chunks.append(current_chunk)
             
             with httpx.Client() as client:
                 for chunk in chunks:
