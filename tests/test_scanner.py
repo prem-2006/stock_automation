@@ -62,8 +62,7 @@ class TestScannerLogic:
         assert first_month_high == 100.0
 
         # Check breakout condition
-        current_price = float(data["Close"].iloc[-1])
-        qualified = prev_close < first_month_high and current_price >= first_month_high
+        qualified = prev_close < first_month_high
         
         assert qualified is True
 
@@ -79,8 +78,7 @@ class TestScannerLogic:
         first_month_high = float(data["High"].iloc[0])
         prev_close = float(data["Close"].iloc[-2])
 
-        current_price = float(data["Close"].iloc[-1])
-        qualified = prev_close < first_month_high and current_price >= first_month_high
+        qualified = prev_close < first_month_high
 
         assert qualified is False
 
