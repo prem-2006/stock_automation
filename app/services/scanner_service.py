@@ -364,28 +364,51 @@ class ScannerService:
 
             result["ipo_first_month_high"] = safe_round(first_month_high)
 
-            # Get current price and previous month close
-            current_price = safe_float(monthly_data["Close"].iloc[-1])
+            # Get real-time current price via fast_info to avoid end-of-month / start-of-month yf bugs
+            try:
+                import yfinance as yf
+                t = yf.Ticker(yf_symbol)
+                current_price = safe_float(t.fast_info.get('lastPrice'))
+            except Exception as e:
+                logger.warning(f"fast_info failed for {symbol}: {e}")
+                current_price = safe_float(monthly_data["Close"].iloc[-1])
+
             if current_price is not None and current_price > 0:
                 result["current_price"] = safe_round(current_price)
                 
-            if len(monthly_data) >= 2:
-                prev_close = safe_float(monthly_data["Close"].iloc[-2])
-                if prev_close is not None and prev_close > 0:
-                    result["previous_month_close"] = safe_round(prev_close)
+            # Explicitly find the PREVIOUS month's close based on today's date
+            today = datetime.now()
+            if today.month == 1:
+                prev_month_year = today.year - 1
+                prev_month_month = 12
+            else:
+                prev_month_year = today.year
+                prev_month_month = today.month - 1
+
+            prev_close = None
+            breakout_month_str = None
+            for idx, row in monthly_data.iterrows():
+                if idx.year == prev_month_year and idx.month == prev_month_month:
+                    prev_close = safe_float(row["Close"])
+                    breakout_month_str = idx.strftime("%Y-%m")
+                    break
+
+            if prev_close is not None and prev_close > 0:
+                result["previous_month_close"] = safe_round(prev_close)
 
             # Update listing date from data if not available
             if result["listing_date"] is None:
                 result["listing_date"] = monthly_data.index[0]
 
-            # Step 2: Check if previous month close < first month high
+            # Step 2: Check if previous month close < first month high AND current price >= first month high
             prev_close = result.get("previous_month_close")
-            if prev_close is not None and prev_close < first_month_high:
-                result["qualified"] = True
+            if prev_close is not None and current_price is not None:
+                if prev_close < first_month_high and current_price >= first_month_high:
+                    result["qualified"] = True
                 try:
-                    result["breakout_month"] = monthly_data.index[-2].strftime("%Y-%m")
+                    result["breakout_month"] = breakout_month_str if breakout_month_str else "Unknown"
                 except Exception:
-                    result["breakout_month"] = str(monthly_data.index[-2])[:7]
+                    result["breakout_month"] = "Unknown"
                 result["breakout_close"] = prev_close
 
                 if current_price is not None and first_month_high > 0:
