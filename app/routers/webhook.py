@@ -163,17 +163,24 @@ async def telegram_webhook(
                 int(chat_id),
                 "👋 Welcome to the <b>IPO Breakout Scanner</b>!\n\n"
                 "To get started, please tell me the IPO year you want to scan.\n\n"
-                "📅 <b>Enter IPO Year</b> (Example: 2020)"
+                "📅 <b>Enter IPO Year</b> (Example: 2020) or type <b>ALL</b> to scan the entire market."
             )
 
         elif conv.current_state == "awaiting_year":
+            text_upper = text.upper().strip()
+            
+            # Check if they typed "ALL"
+            if text_upper == "ALL":
+                year = 0
+                current_year = datetime.now().year
             # Expecting a year
-            if not text.isdigit() or len(text) != 4:
+            elif not text.isdigit() or len(text) != 4:
                 telegram_service.send_message(
                     int(chat_id),
                     "❌ Invalid year format.\n\n"
-                    "Please enter a valid 4-digit year (e.g., 2021)."
+                    "Please enter a valid 4-digit year (e.g., 2021) or type <b>ALL</b>."
                 )
+                return JSONResponse({"status": "ok"})
             else:
                 year = int(text)
                 current_year = datetime.now().year
@@ -183,47 +190,49 @@ async def telegram_webhook(
                         int(chat_id),
                         f"❌ Year must be between 2000 and {current_year}."
                     )
+                    return JSONResponse({"status": "ok"})
+            # Valid year or ALL, create scan job
+            try:
+                scan_id = scanner_service.create_scan_job(year, phone_number=chat_id)
+
+                # Update conversation state
+                conv.current_state = "processing"
+                conv.current_scan_id = scan_id
+                db.commit()
+                
+                scan_msg = "🔍 <b>Scanning ALL NSE stocks...</b>\n\n" if year == 0 else f"🔍 <b>Scanning IPO year {year}...</b>\n\n"
+                
+                telegram_service.send_message(
+                    int(chat_id),
+                    scan_msg +
+                    f"⏳ This may take a few minutes depending on the number of stocks.\n"
+                    f"I'll send you the results with an Excel report once done."
+                )
+
+                if IS_VERCEL:
+                    # On Vercel, we can't spawn threads reliably, so we use BackgroundTasks
+                    background_tasks.add_task(_process_scan_and_notify, scan_id, chat_id)
                 else:
-                    # Valid year, create scan job
-                    try:
-                        scan_id = scanner_service.create_scan_job(year, phone_number=chat_id)
+                    # Standard server: spawn a daemon thread
+                    thread = threading.Thread(
+                        target=_process_scan_and_notify,
+                        args=(scan_id, chat_id),
+                        daemon=True,
+                    )
+                    thread.start()
 
-                        # Update conversation state
-                        conv.current_state = "processing"
-                        conv.current_scan_id = scan_id
-                        db.commit()
-                        
-                        telegram_service.send_message(
-                            int(chat_id),
-                            f"🔍 <b>Scanning IPO year {year}...</b>\n\n"
-                            f"⏳ This may take a few minutes depending on the number of stocks.\n"
-                            f"I'll send you the results with an Excel report once done."
-                        )
-
-                        if IS_VERCEL:
-                            # On Vercel, we can't spawn threads reliably, so we use BackgroundTasks
-                            background_tasks.add_task(_process_scan_and_notify, scan_id, chat_id)
-                        else:
-                            # Standard server: spawn a daemon thread
-                            thread = threading.Thread(
-                                target=_process_scan_and_notify,
-                                args=(scan_id, chat_id),
-                                daemon=True,
-                            )
-                            thread.start()
-
-                    except Exception as e:
-                        logger.error(f"Error starting scan: {e}")
-                        db.rollback()
-                        telegram_service.send_message(
-                            int(chat_id),
-                            "❌ Failed to start the scan. Please try again."
-                        )
-                        conv.current_state = "idle"
-                        try:
-                            db.commit()
-                        except:
-                            db.rollback()
+            except Exception as e:
+                logger.error(f"Error starting scan: {e}")
+                db.rollback()
+                telegram_service.send_message(
+                    int(chat_id),
+                    "❌ Failed to start the scan. Please try again."
+                )
+                conv.current_state = "idle"
+                try:
+                    db.commit()
+                except:
+                    db.rollback()
 
         elif conv.current_state == "processing":
             telegram_service.send_message(

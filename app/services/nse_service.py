@@ -139,7 +139,10 @@ class NSEService:
             return []
 
         # Filter by IPO year
-        if "IPO_YEAR" in df.columns:
+        if year == 0:
+            filtered = df
+            logger.info("Scanning ALL stocks (year=0)")
+        elif "IPO_YEAR" in df.columns:
             filtered = df[df["IPO_YEAR"] == year]
         elif "DATE OF LISTING" in df.columns:
             df["DATE OF LISTING"] = pd.to_datetime(df["DATE OF LISTING"], errors="coerce")

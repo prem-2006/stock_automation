@@ -11,7 +11,7 @@ from pydantic import BaseModel, Field
 
 class ScanRequest(BaseModel):
     """Request body for initiating a stock scan."""
-    year: int = Field(..., ge=1990, le=2030, description="IPO year to scan")
+    year: int = Field(..., ge=0, le=2030, description="IPO year to scan (0 for all years)")
     phone_number: Optional[str] = Field(None, description="WhatsApp number for results delivery")
 
 
