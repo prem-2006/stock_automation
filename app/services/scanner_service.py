@@ -98,12 +98,14 @@ class ScannerService:
         finally:
             session.close()
 
-    def run_scan(self, scan_id: str) -> Dict:
+    def run_scan(self, scan_id: str, target_month: int = None, target_year_override: int = None) -> Dict:
         """
         Execute the full scanning pipeline for a given scan job.
 
         Args:
             scan_id: UUID of the scan job
+            target_month: Optional month number (1-12) to use as reference instead of auto-detecting.
+            target_year_override: Optional year for the reference month (used with target_month).
 
         Returns:
             Summary dict with results
@@ -141,7 +143,7 @@ class ScannerService:
                 return self._build_summary(job, [])
 
             # Step 2: Scan each stock in parallel
-            results = self._scan_stocks_parallel(stocks, year)
+            results = self._scan_stocks_parallel(stocks, year, target_month=target_month, target_year_override=target_year_override)
 
             # Step 3: Save results to database — one by one, skip failures
             qualified_results = []
@@ -249,13 +251,15 @@ class ScannerService:
             except Exception:
                 pass
 
-    def _scan_stocks_parallel(self, stocks: List[Dict], year: int) -> List[Dict]:
+    def _scan_stocks_parallel(self, stocks: List[Dict], year: int, target_month: int = None, target_year_override: int = None) -> List[Dict]:
         """
         Scan multiple stocks in parallel using ThreadPoolExecutor.
 
         Args:
             stocks: List of stock dicts with symbol, company_name, listing_date
             year: IPO year
+            target_month: Optional month number override for reference month.
+            target_year_override: Optional year for the reference month.
 
         Returns:
             List of result dicts for each stock
@@ -267,7 +271,7 @@ class ScannerService:
 
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             future_to_stock = {
-                executor.submit(self._scan_single_stock, stock, year): stock
+                executor.submit(self._scan_single_stock, stock, year, target_month, target_year_override): stock
                 for stock in stocks
             }
 
@@ -289,7 +293,7 @@ class ScannerService:
 
         return results
 
-    def _scan_single_stock(self, stock: Dict, year: int) -> Dict:
+    def _scan_single_stock(self, stock: Dict, year: int, target_month: int = None, target_year_override: int = None) -> Dict:
         """
         Scan a single stock for the IPO breakout condition.
         Fully protected against bad data from yfinance.
@@ -297,8 +301,9 @@ class ScannerService:
         Args:
             stock: Dict with symbol, company_name, listing_date
             year: IPO year
-
-        Returns:
+            target_month: Optional specific month to use as reference (overrides auto-detect).
+            target_year_override: Optional year for the reference month.
+         Returns:
             Result dict with all screening data
         """
         symbol = stock.get("symbol", "UNKNOWN")
@@ -376,9 +381,13 @@ class ScannerService:
             if current_price is not None and current_price > 0:
                 result["current_price"] = safe_round(current_price)
                 
-            # Explicitly find the PREVIOUS month's close based on today's date
+            # Explicitly find the PREVIOUS month's close based on today's date OR user-selected month
             today = datetime.now()
-            if today.month == 1:
+            if target_month is not None and target_year_override is not None:
+                # Bot 2: use the user's chosen month/year
+                prev_month_year = target_year_override
+                prev_month_month = target_month
+            elif today.month == 1:
                 prev_month_year = today.year - 1
                 prev_month_month = 12
             else:

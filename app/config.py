@@ -20,7 +20,10 @@ class Settings(BaseSettings):
 
     # --- Telegram Bot Config ---
     TELEGRAM_BOT_TOKEN: str = Field(
-        "", description="Telegram Bot Token"
+        "", description="Telegram Bot Token (Bot 1 - auto year scan)"
+    )
+    TELEGRAM_BOT2_TOKEN: str = Field(
+        "", description="Telegram Bot Token (Bot 2 - manual month/year selection)"
     )
 
     # --- Server ---

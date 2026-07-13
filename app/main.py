@@ -20,7 +20,7 @@ from fastapi.staticfiles import StaticFiles
 
 from app.config import get_settings
 from app.database import init_db
-from app.routers import webhook, scan
+from app.routers import webhook, scan, webhook_bot2
 from app.utils.logger import setup_logger, get_logger
 
 # Detect if running on Vercel (serverless)
@@ -99,6 +99,7 @@ def create_app() -> FastAPI:
     # --- Register Routers ---
     app.include_router(webhook.router)
     app.include_router(scan.router)
+    app.include_router(webhook_bot2.router)
 
     # --- Root endpoint ---
     @app.get("/")

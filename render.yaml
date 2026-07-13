@@ -13,6 +13,8 @@ services:
     envVars:
       - key: TELEGRAM_BOT_TOKEN
         sync: false
+      - key: TELEGRAM_BOT2_TOKEN
+        sync: false
       - key: BASE_URL
         value: "https://ipo-breakout-scanner.onrender.com"
       - key: DATABASE_URL
