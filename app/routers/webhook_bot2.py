@@ -121,6 +121,22 @@ def _month_keyboard() -> dict:
     }
 
 
+def _year_keyboard() -> dict:
+    today_year = datetime.now().year
+    return {
+        "inline_keyboard": [
+            [{"text": str(today_year), "callback_data": f"year_{today_year}"},
+             {"text": str(today_year-1), "callback_data": f"year_{today_year-1}"},
+             {"text": str(today_year-2), "callback_data": f"year_{today_year-2}"}],
+            [{"text": str(today_year-3), "callback_data": f"year_{today_year-3}"},
+             {"text": str(today_year-4), "callback_data": f"year_{today_year-4}"},
+             {"text": str(today_year-5), "callback_data": f"year_{today_year-5}"}],
+            [{"text": "ALL NSE Stocks", "callback_data": "year_0"}]
+        ]
+    }
+
+
+
 def _answer_callback(cq_id: str) -> None:
     try:
         with httpx.Client() as client:
@@ -238,7 +254,28 @@ async def telegram2_webhook(
             data = cq.get("data", "")
             _answer_callback(cq_id)
 
-            if data.startswith("month_"):
+            if data.startswith("year_"):
+                year = int(data.split("_")[1])
+                _pending_years[chat_id] = year
+                
+                conv = _get_or_create_conv(db, chat_id)
+                conv.current_state = "awaiting_month"
+                try:
+                    db.commit()
+                except Exception:
+                    db.rollback()
+
+                year_label = "ALL years" if year == 0 else str(year)
+                _send_message(
+                    int(chat_id),
+                    f"✅ Year set to: <b>{year_label}</b>\n\n"
+                    f"🗓 <b>Step 2:</b> Select the reference month for comparison:\n\n"
+                    f"👇 Tap a month below:",
+                    reply_markup=_month_keyboard()
+                )
+                return JSONResponse({"status": "ok"})
+
+            elif data.startswith("month_"):
                 month_num = int(data.split("_")[1])
                 year = _pending_years.get(chat_id)
                 if year is None:
@@ -322,7 +359,8 @@ async def telegram2_webhook(
                 "\U0001f44b Welcome to <b>IPO Breakout Scanner v2</b>!\n\n"
                 "This bot lets you choose both the <b>IPO year</b> AND the <b>reference month</b> "
                 "for the scan.\n\n"
-                "\U0001f4c5 <b>Step 1:</b> Enter the IPO year (e.g. <b>2024</b>) or type <b>ALL</b>."
+                "\U0001f4c5 <b>Step 1:</b> Select the IPO year below:",
+                reply_markup=_year_keyboard()
             )
             return JSONResponse({"status": "ok"})
 
@@ -424,7 +462,8 @@ async def telegram2_webhook(
         _send_message(
             int(chat_id),
             "\U0001f44b Welcome to <b>IPO Breakout Scanner v2</b>!\n\n"
-            "\U0001f4c5 Enter the IPO year (e.g. <b>2024</b>) or type <b>ALL</b>."
+            "\U0001f4c5 <b>Step 1:</b> Select the IPO year below:",
+            reply_markup=_year_keyboard()
         )
 
     except Exception as e:
