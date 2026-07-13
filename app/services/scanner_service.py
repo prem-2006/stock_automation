@@ -369,24 +369,37 @@ class ScannerService:
 
             result["ipo_first_month_high"] = safe_round(first_month_high)
 
-            # Get real-time current price via fast_info to avoid end-of-month / start-of-month yf bugs
-            try:
-                import yfinance as yf
-                t = yf.Ticker(yf_symbol)
-                current_price = safe_float(t.fast_info.get('lastPrice'))
-            except Exception as e:
-                logger.warning(f"fast_info failed for {symbol}: {e}")
-                current_price = safe_float(monthly_data["Close"].iloc[-1])
+            # Get current price
+            if target_month is not None and target_year_override is not None:
+                # Bot 2: Current price is the close of the selected target month
+                current_price = None
+                for idx, row in monthly_data.iterrows():
+                    if idx.year == target_year_override and idx.month == target_month:
+                        current_price = safe_float(row["Close"])
+                        break
+            else:
+                # Bot 1: Get real-time current price via fast_info to avoid end-of-month / start-of-month yf bugs
+                try:
+                    import yfinance as yf
+                    t = yf.Ticker(yf_symbol)
+                    current_price = safe_float(t.fast_info.get('lastPrice'))
+                except Exception as e:
+                    logger.warning(f"fast_info failed for {symbol}: {e}")
+                    current_price = safe_float(monthly_data["Close"].iloc[-1])
 
             if current_price is not None and current_price > 0:
                 result["current_price"] = safe_round(current_price)
                 
-            # Explicitly find the PREVIOUS month's close based on today's date OR user-selected month
+            # Explicitly find the PREVIOUS month's close
             today = datetime.now()
             if target_month is not None and target_year_override is not None:
-                # Bot 2: use the user's chosen month/year
-                prev_month_year = target_year_override
-                prev_month_month = target_month
+                # Bot 2: Previous month is target_month minus 1
+                if target_month == 1:
+                    prev_month_year = target_year_override - 1
+                    prev_month_month = 12
+                else:
+                    prev_month_year = target_year_override
+                    prev_month_month = target_month - 1
             elif today.month == 1:
                 prev_month_year = today.year - 1
                 prev_month_month = 12
