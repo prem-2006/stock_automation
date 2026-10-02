@@ -123,17 +123,22 @@ def _month_keyboard() -> dict:
 
 def _year_keyboard() -> dict:
     today_year = datetime.now().year
-    return {
-        "inline_keyboard": [
-            [{"text": str(today_year), "callback_data": f"year_{today_year}"},
-             {"text": str(today_year-1), "callback_data": f"year_{today_year-1}"},
-             {"text": str(today_year-2), "callback_data": f"year_{today_year-2}"}],
-            [{"text": str(today_year-3), "callback_data": f"year_{today_year-3}"},
-             {"text": str(today_year-4), "callback_data": f"year_{today_year-4}"},
-             {"text": str(today_year-5), "callback_data": f"year_{today_year-5}"}],
-            [{"text": "ALL NSE Stocks", "callback_data": "year_0"}]
-        ]
-    }
+    keyboard = []
+    row = []
+    
+    # Generate years from current year down to 2015
+    for year in range(today_year, 2014, -1):
+        row.append({"text": str(year), "callback_data": f"year_{year}"})
+        if len(row) == 3:
+            keyboard.append(row)
+            row = []
+            
+    # Add any remaining years if not a multiple of 3
+    if row:
+        keyboard.append(row)
+        
+    keyboard.append([{"text": "ALL NSE Stocks", "callback_data": "year_0"}])
+    return {"inline_keyboard": keyboard}
 
 
 
