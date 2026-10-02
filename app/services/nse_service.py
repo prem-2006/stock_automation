@@ -65,26 +65,38 @@ class NSEService:
         Returns:
             DataFrame with columns: SYMBOL, NAME OF COMPANY, DATE OF LISTING, etc.
         """
-        # Try cache first
+        # Try cache first (fresh)
         cached_data = self.cache.get("nse_equity_list")
         if cached_data is not None:
             logger.info("Using cached NSE equity list")
             df = pd.read_csv(io.StringIO(cached_data))
             return df
 
-        # Fetch from NSE
+        # Fetch from NSE live
         df = self._fetch_from_nse_csv()
         if df is not None and not df.empty:
             # Cache the data
             self.cache.set("nse_equity_list", df.to_csv(index=False))
             return df
 
-        # Fallback: try to load from local file
+        # Fallback 1: try to load from bundled local file
         local_path = os.path.join("data", "nse_equity_master.csv")
         if os.path.exists(local_path):
             logger.info("Using local NSE equity master file")
             df = pd.read_csv(local_path)
             return df
+
+        # Fallback 2: serve stale cache rather than returning empty
+        stale_path = self.cache._get_cache_path("nse_equity_list")
+        if os.path.exists(stale_path):
+            logger.warning("Live fetch failed — serving stale NSE equity cache")
+            try:
+                with open(stale_path, "r", encoding="utf-8") as f:
+                    stale_data = f.read()
+                if stale_data:
+                    return pd.read_csv(io.StringIO(stale_data))
+            except Exception as e:
+                logger.error(f"Failed to read stale cache: {e}")
 
         logger.error("Failed to fetch NSE equity list from all sources")
         return pd.DataFrame()
