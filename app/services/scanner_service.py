@@ -422,18 +422,23 @@ class ScannerService:
             if result["listing_date"] is None:
                 result["listing_date"] = monthly_data.index[0]
 
-            # Step 2: Check if previous month close < first month high AND current price >= first month high
+            # Step 2: Qualify if current price >= IPO first month high
+            # (stock is trading above its IPO listing high — regardless of where it was last month)
             prev_close = result.get("previous_month_close")
-            if prev_close is not None and current_price is not None:
-                if prev_close < first_month_high and current_price >= first_month_high:
-                    result["qualified"] = True
+
+            # Always set breakout_month and breakout_close when we have prev data
+            if prev_close is not None:
                 try:
                     result["breakout_month"] = breakout_month_str if breakout_month_str else "Unknown"
                 except Exception:
                     result["breakout_month"] = "Unknown"
                 result["breakout_close"] = prev_close
 
-                if current_price is not None and first_month_high > 0:
+            if current_price is not None:
+                if current_price >= first_month_high:
+                    result["qualified"] = True
+
+                if first_month_high > 0:
                     result["pct_above_ipo_high"] = safe_round(
                         ((current_price - first_month_high) / first_month_high) * 100
                     )
