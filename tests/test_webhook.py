@@ -105,16 +105,18 @@ class TestScanNotification:
     @patch("app.routers.webhook.scanner_service.run_scan")
     def test_results_are_sent_as_a_text_message(self, mock_run_scan, mock_send_message):
         mock_run_scan.return_value = {
-            "year": 2024, "total_listed": 1, "total_scanned": 1, "qualified_count": 1, "skipped": {},
+            "year": 2026, "breakout_month": (2026, 10), "previous_month": (2026, 9), "live": True,
+            "total_listed": 1, "total_scanned": 1, "qualified_count": 1, "skipped": {},
             "qualified_list": [
-                {"symbol": "ABC", "current_price": 110.0, "ipo_first_month_high": 100.0, "pct_above_ipo_high": 10.0}
+                {"symbol": "ABC", "ipo_first_month_high": 100.0, "previous_month_close": 95.0,
+                 "current_price": 110.0, "pct_above_ipo_high": 10.0}
             ],
         }
 
         _process_scan_and_notify("scan-1", "111")
 
         mock_send_message.assert_called_once()
-        assert "<b>ABC</b> ₹110.00 vs ₹100.00 (+10.00%)" in mock_send_message.call_args[0][1]
+        assert "<b>ABC</b> IPO high ₹100.00 | Sep close ₹95.00 | Now ₹110.00 (+10.00%)" in mock_send_message.call_args[0][1]
 
     @patch("app.routers.webhook.telegram_service.send_message")
     @patch("app.routers.webhook.scanner_service.run_scan", side_effect=RuntimeError("Yahoo <down>"))

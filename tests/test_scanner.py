@@ -19,10 +19,12 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 os.environ.setdefault("DATABASE_URL", "sqlite:///./test_db.db")
 
 from app.services.scanner_service import (
+    IST,
     ScannerService,
     SKIP_NO_LISTING_MONTH,
-    SKIP_NO_PRICE,
     SKIP_OLDER_LISTING,
+    SKIP_TOO_RECENT,
+    breakout_months,
 )
 
 
@@ -184,7 +186,12 @@ def scanner(monkeypatch):
     return ScannerService()
 
 
-def _scan(scanner, monkeypatch, nse, bse=None, listing="2024-10-22", live_price=None, year=2024, **kwargs):
+# Breakout in October 2026 at the live price, with September 2026 as the previous month
+LIVE_OCT = ((2026, 10), (2026, 9), True)
+
+
+def _scan(scanner, monkeypatch, nse, bse=None, listing="2024-10-22", year=2024,
+          months=((2024, 12), (2024, 11), False), live_price=None):
     """Run _scan_single_stock for symbol ABC against canned NSE/BSE candles and a live price."""
     frames = {"ABC.NS": nse, "ABC.BO": bse}
     monkeypatch.setattr(scanner, "_fetch_monthly_data", lambda sym, retry_on_empty=True: frames.get(sym))
@@ -192,7 +199,14 @@ def _scan(scanner, monkeypatch, nse, bse=None, listing="2024-10-22", live_price=
     ticker.fast_info.get.return_value = live_price
     monkeypatch.setattr("app.services.scanner_service.yf.Ticker", lambda sym: ticker)
     stock = {"symbol": "ABC", "company_name": "ABC Ltd", "listing_date": listing}
-    return scanner._scan_single_stock(stock, year, **kwargs)
+    return scanner._scan_single_stock(stock, year, months)
+
+
+def _listed_march_2026(sep_close):
+    """IPO in March 2026 with a first-month high of 100; candles up to the running October."""
+    highs = [100.0, 95.0, 95.0, 95.0, 95.0, 99.0, 108.0, 106.0]
+    closes = [90.0, 80.0, 85.0, 88.0, 92.0, 95.0, sep_close, 97.0]
+    return _candles("2026-03-01", highs, closes)
 
 
 class TestScanSingleStock:
@@ -207,34 +221,61 @@ class TestScanSingleStock:
 
         assert ticker.history.call_args.kwargs["auto_adjust"] is False
 
-    def test_qualifies_at_ipo_high(self, scanner, monkeypatch):
-        nse = _candles("2024-10-01", [1970.0, 1939.0], [1822.55, 1916.55])
-        r = _scan(scanner, monkeypatch, nse, live_price=1970.0)
+    def test_fresh_breakout_qualifies(self, scanner, monkeypatch):
+        # September closed below the March IPO high and October's live price is above it
+        nse = _listed_march_2026(sep_close=95.0)
+        r = _scan(scanner, monkeypatch, nse, listing="2026-03-12", year=2026, months=LIVE_OCT, live_price=104.0)
 
         assert r["skip_reason"] is None
+        assert r["ipo_first_month_high"] == 100.0
+        assert r["previous_month_close"] == 95.0
+        assert r["current_price"] == 104.0
         assert r["qualified"] is True
-        assert r["ipo_first_month_high"] == 1970.0
-        assert r["pct_above_ipo_high"] == 0.0
+        assert r["pct_above_ipo_high"] == 4.0
+        assert r["breakout_month"] == "2026-10"
 
-    def test_below_ipo_high_is_checked_but_not_qualified(self, scanner, monkeypatch):
-        nse = _candles("2024-10-01", [1970.0, 1939.0], [1822.55, 1916.55])
-        r = _scan(scanner, monkeypatch, nse, live_price=1954.1)
+    def test_already_above_last_month_is_not_a_fresh_breakout(self, scanner, monkeypatch):
+        nse = _listed_march_2026(sep_close=105.0)
+        r = _scan(scanner, monkeypatch, nse, listing="2026-03-12", year=2026, months=LIVE_OCT, live_price=110.0)
 
         assert r["skip_reason"] is None
         assert r["qualified"] is False
-        assert r["pct_above_ipo_high"] == -0.81
+        assert r["current_price"] is None  # live price not even fetched
+
+    def test_still_below_ipo_high_is_not_qualified(self, scanner, monkeypatch):
+        nse = _listed_march_2026(sep_close=95.0)
+        r = _scan(scanner, monkeypatch, nse, listing="2026-03-12", year=2026, months=LIVE_OCT, live_price=99.99)
+
+        assert r["skip_reason"] is None
+        assert r["qualified"] is False
+        assert r["pct_above_ipo_high"] == -0.01
 
     def test_float_noise_does_not_hide_a_stock_at_its_ipo_high(self, scanner, monkeypatch):
-        nse = _candles("2024-10-01", [394.95000457763672, 380.0], [348.85, 370.0])
-        r = _scan(scanner, monkeypatch, nse, live_price=394.9499938964844)
+        nse = _candles("2024-10-01", [394.95000457763672, 390.0], [348.85, 380.0])
+        r = _scan(scanner, monkeypatch, nse, months=((2024, 12), (2024, 11), True), live_price=394.9499938964844)
 
         assert r["qualified"] is True
         assert r["current_price"] == 394.95
 
+    def test_ipo_last_month_can_break_out_this_month(self, scanner, monkeypatch):
+        # Listed in September: its own September close is the previous-month close
+        nse = _candles("2026-09-01", [581.95, 643.5], [510.35, 618.3])
+        r = _scan(scanner, monkeypatch, nse, listing="2026-09-17", year=2026, months=LIVE_OCT, live_price=618.0)
+
+        assert r["previous_month_close"] == 510.35
+        assert r["qualified"] is True
+
+    def test_listed_this_month_is_too_recent(self, scanner, monkeypatch):
+        nse = _candles("2026-10-01", [300.0], [290.0])
+        r = _scan(scanner, monkeypatch, nse, listing="2026-10-06", year=2026, months=LIVE_OCT, live_price=310.0)
+
+        assert r["skip_reason"] == SKIP_TOO_RECENT
+        assert r["qualified"] is False
+
     def test_old_bse_company_newly_listed_on_nse_is_not_an_ipo(self, scanner, monkeypatch):
         nse = _candles("2026-08-01", [500.0, 520.0], [480.0, 510.0])
         bse = _candles("2002-03-01", [10.0] * 5, [9.0] * 5)
-        r = _scan(scanner, monkeypatch, nse, bse, listing="2026-04-20", live_price=530.0, year=2026)
+        r = _scan(scanner, monkeypatch, nse, bse, listing="2026-04-20", year=2026, months=LIVE_OCT, live_price=530.0)
 
         assert r["skip_reason"] == SKIP_OLDER_LISTING
         assert r["qualified"] is False
@@ -242,15 +283,15 @@ class TestScanSingleStock:
     def test_missing_listing_month_is_not_guessed(self, scanner, monkeypatch):
         # Listed on the last trading day of March; Yahoo has no candle for March
         nse = _candles("2018-04-01", [582.0, 600.0], [560.0, 590.0])
-        r = _scan(scanner, monkeypatch, nse, listing="2018-03-28", live_price=4000.0, year=2018)
+        r = _scan(scanner, monkeypatch, nse, listing="2018-03-28", year=2018, months=((2018, 5), (2018, 4), False))
 
         assert r["skip_reason"] == SKIP_NO_LISTING_MONTH
         assert r["qualified"] is False
 
     def test_bse_candle_fills_listing_month_missing_on_nse(self, scanner, monkeypatch):
-        nse = _candles("2024-11-01", [210.0, 220.0], [200.0, 215.0])
+        nse = _candles("2024-11-01", [210.0, 270.0], [200.0, 260.0])
         bse = _candles("2024-10-01", [250.0, 211.0], [205.0, 201.0])
-        r = _scan(scanner, monkeypatch, nse, bse, listing="2024-10-22", live_price=260.0)
+        r = _scan(scanner, monkeypatch, nse, bse)
 
         assert r["skip_reason"] is None
         assert r["ipo_first_month_high"] == 250.0
@@ -260,24 +301,33 @@ class TestScanSingleStock:
     def test_all_scan_holds_each_stock_to_its_listing_year(self, scanner, monkeypatch):
         nse = _candles("2016-05-01", [50.0, 55.0], [45.0, 52.0])
         bse = _candles("2003-01-01", [5.0] * 3, [4.0] * 3)
-        r = _scan(scanner, monkeypatch, nse, bse, listing="2016-05-10", live_price=300.0, year=0)
+        r = _scan(scanner, monkeypatch, nse, bse, listing="2016-05-10", year=0, months=((2016, 7), (2016, 6), False))
 
         assert r["skip_reason"] == SKIP_OLDER_LISTING
 
-    def test_reference_month_close_is_compared(self, scanner, monkeypatch):
+    def test_selected_breakout_month_uses_its_close(self, scanner, monkeypatch):
+        # Bot 2: November closed below the October IPO high, December closed above it
         nse = _candles("2024-10-01", [100.0, 95.0, 120.0, 90.0], [90.0, 92.0, 110.0, 85.0])
-        r = _scan(scanner, monkeypatch, nse, target_month=12, target_year_override=2024)
+        r = _scan(scanner, monkeypatch, nse)
 
+        assert r["previous_month_close"] == 92.0
         assert r["current_price"] == 110.0
         assert r["qualified"] is True
         assert r["pct_above_ipo_high"] == 10.0
 
-    def test_reference_month_not_after_listing_month_is_skipped(self, scanner, monkeypatch):
+    def test_selected_breakout_month_before_listing_is_too_recent(self, scanner, monkeypatch):
         nse = _candles("2024-10-01", [100.0, 95.0], [100.0, 92.0])
-        r = _scan(scanner, monkeypatch, nse, target_month=10, target_year_override=2024)
+        r = _scan(scanner, monkeypatch, nse, months=((2024, 10), (2024, 9), False))
 
-        assert r["skip_reason"] == SKIP_NO_PRICE
+        assert r["skip_reason"] == SKIP_TOO_RECENT
         assert r["qualified"] is False
+
+    def test_breakout_months(self, monkeypatch):
+        monkeypatch.setattr("app.services.scanner_service.now_ist", lambda: datetime(2026, 10, 8, tzinfo=IST))
+
+        assert breakout_months() == ((2026, 10), (2026, 9), True)
+        assert breakout_months(8, 2026) == ((2026, 8), (2026, 7), False)
+        assert breakout_months(1, 2027) == ((2027, 1), (2026, 12), False)
 
 
 class TestBuildSummary:
@@ -293,8 +343,11 @@ class TestBuildSummary:
             {"symbol": "HAL", "qualified": False, "skip_reason": SKIP_NO_LISTING_MONTH},
         ]
 
-        summary = scanner._build_summary(job, results)
+        summary = scanner._build_summary(job, results, LIVE_OCT)
 
+        assert summary["breakout_month"] == (2026, 10)
+        assert summary["previous_month"] == (2026, 9)
+        assert summary["live"] is True
         assert summary["total_listed"] == 5
         assert summary["total_scanned"] == 3
         assert summary["qualified_count"] == 2

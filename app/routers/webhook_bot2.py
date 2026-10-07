@@ -3,7 +3,8 @@ Telegram Bot 2 Webhook Router - Manual Month/Year Selection.
 
 Same stock screening conditions as Bot 1, but user picks:
   1. IPO Year (e.g. 2024 or ALL)
-  2. Reference Month - the month whose close is compared against IPO first-month high
+  2. Breakout Month - that month must close at or above the IPO first-month high
+     while the month before it closed below
 
 Conversation flow:
   idle -> awaiting_year -> awaiting_month -> processing -> idle
@@ -157,9 +158,7 @@ def _run_scan_and_notify(scan_id: str, chat_id: str, target_month: int, target_y
     try:
         logger.info(f"Bot2 scan start: job={scan_id} month={target_month}/{target_year}")
         summary = scanner_service.run_scan(scan_id, target_month=target_month, target_year_override=target_year)
-
-        month_name = MONTH_NAMES.get(target_month, str(target_month))
-        _send_message(int(chat_id), format_scan_summary(summary, reference_month=f"{month_name} {target_year}"))
+        _send_message(int(chat_id), format_scan_summary(summary))
 
     except Exception as e:
         logger.error(f"Bot2 scan error: {e}", exc_info=True)
@@ -207,7 +206,7 @@ async def telegram2_webhook(
                 _send_message(
                     int(chat_id),
                     f"✅ Year set to: <b>{year_label}</b>\n\n"
-                    f"🗓 <b>Step 2:</b> Select the reference month for comparison:\n\n"
+                    f"🗓 <b>Step 2:</b> Select the breakout month:\n\n"
                     f"👇 Tap a month below:",
                     reply_markup=_month_keyboard()
                 )
@@ -235,7 +234,7 @@ async def telegram2_webhook(
                     _send_message(
                         int(chat_id),
                         f"\U0001f50d <b>Scanning {year_label}...</b>\n\n"
-                        f"\U0001f5d3 Reference Month: <b>{month_name} {target_year}</b>\n\n"
+                        f"\U0001f5d3 Breakout Month: <b>{month_name} {target_year}</b>\n\n"
                         f"\u23f3 Please wait, this may take a few minutes."
                     )
 
@@ -295,7 +294,7 @@ async def telegram2_webhook(
             _send_message(
                 int(chat_id),
                 "\U0001f44b Welcome to <b>IPO Breakout Scanner v2</b>!\n\n"
-                "This bot lets you choose both the <b>IPO year</b> AND the <b>reference month</b> "
+                "This bot lets you choose both the <b>IPO year</b> AND the <b>breakout month</b> "
                 "for the scan.\n\n"
                 "\U0001f4c5 <b>Step 1:</b> Select the IPO year below:",
                 reply_markup=_year_keyboard()
@@ -327,7 +326,7 @@ async def telegram2_webhook(
             _send_message(
                 int(chat_id),
                 f"\u2705 Year set to: <b>{year_label}</b>\n\n"
-                f"\U0001f5d3 <b>Step 2:</b> Select the reference month for comparison:\n\n"
+                f"\U0001f5d3 <b>Step 2:</b> Select the breakout month:\n\n"
                 f"\U0001f447 Tap a month below:",
                 reply_markup=_month_keyboard()
             )
@@ -359,7 +358,7 @@ async def telegram2_webhook(
                 _send_message(
                     int(chat_id),
                     f"\U0001f50d <b>Scanning {year_label}...</b>\n\n"
-                    f"\U0001f5d3 Reference Month: <b>{month_name} {target_year}</b>\n\n"
+                    f"\U0001f5d3 Breakout Month: <b>{month_name} {target_year}</b>\n\n"
                     f"\u23f3 Please wait, this may take a few minutes."
                 )
 

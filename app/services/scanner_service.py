@@ -4,7 +4,8 @@ IPO Breakout Scanner Service.
 Core screening engine that:
 1. Fetches monthly OHLC data for each stock using yfinance
 2. Identifies the first listed month's HIGH
-3. Checks whether the stock now trades at or above that IPO HIGH
+3. Finds fresh breakouts: the previous month closed below that IPO HIGH and
+   the current month (live price) is at or above it
 4. Generates results with parallel processing
 
 All prices are actual traded prices (adjusted for splits/bonuses, NOT for
@@ -23,7 +24,7 @@ import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone, UTC
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Tuple
 
 import pandas as pd
 import yfinance as yf
@@ -42,13 +43,32 @@ IST = timezone(timedelta(hours=5, minutes=30))
 # Why a stock was left out of the comparison (result["skip_reason"])
 SKIP_OLDER_LISTING = "older_listing"            # traded on NSE/BSE before its IPO year: not a fresh IPO
 SKIP_NO_LISTING_MONTH = "no_listing_month_data"  # price data does not cover the listing month
-SKIP_NO_PRICE = "no_price"                       # no current price / reference-month close
+SKIP_TOO_RECENT = "too_recent"                   # listed in/after the breakout month: no previous-month close
 SKIP_NO_DATA = "no_data"                         # no or insufficient price data
+
+# (breakout (year, month), previous (year, month), whether the breakout month is still running)
+BreakoutMonths = Tuple[Tuple[int, int], Tuple[int, int], bool]
 
 
 def now_ist() -> datetime:
     """Current date and time in IST."""
     return datetime.now(IST)
+
+
+def breakout_months(target_month: Optional[int] = None, target_year: Optional[int] = None) -> BreakoutMonths:
+    """
+    Months for the breakout check.
+
+    Without a target (Bot 1) the breakout month is the running month, judged on
+    the live price, e.g. October (live) with September as the previous month.
+    With a target (Bot 2) it is that month, judged on its close.
+    """
+    live = target_month is None or target_year is None
+    if live:
+        today = now_ist()
+        target_year, target_month = today.year, today.month
+    previous = (target_year - 1, 12) if target_month == 1 else (target_year, target_month - 1)
+    return (target_year, target_month), previous, live
 
 
 def safe_float(v):
@@ -119,12 +139,15 @@ class ScannerService:
 
         Args:
             scan_id: UUID of the scan job
-            target_month: Optional month number (1-12) to use as reference instead of auto-detecting.
-            target_year_override: Optional year for the reference month (used with target_month).
+            target_month: Optional breakout month (1-12), judged on its close. Defaults to
+                the running month, judged on the live price.
+            target_year_override: Optional year for the breakout month (used with target_month).
 
         Returns:
             Summary dict with results
         """
+        months = breakout_months(target_month, target_year_override)
+
         SessionLocal = get_session_factory()
         session = SessionLocal()
 
@@ -155,10 +178,10 @@ class ScannerService:
                 job.error_message = f"No stocks found for IPO year {year}"
                 session.commit()
                 logger.warning(f"No stocks found for year {year}")
-                return self._build_summary(job, [])
+                return self._build_summary(job, [], months)
 
             # Step 2: Scan each stock in parallel
-            results = self._scan_stocks_parallel(stocks, year, target_month=target_month, target_year_override=target_year_override)
+            results = self._scan_stocks_parallel(stocks, year, months)
 
             # Step 3: Save results to database — one by one, skip failures
             for result in results:
@@ -216,7 +239,7 @@ class ScannerService:
                 f"{job.scanned_stocks} checked, {job.qualified_stocks} qualified"
             )
 
-            return self._build_summary(job, results)
+            return self._build_summary(job, results, months)
 
         except Exception as e:
             # Top-level catch — always rollback first, then try to mark job as failed
@@ -244,15 +267,14 @@ class ScannerService:
             except Exception:
                 pass
 
-    def _scan_stocks_parallel(self, stocks: List[Dict], year: int, target_month: int = None, target_year_override: int = None) -> List[Dict]:
+    def _scan_stocks_parallel(self, stocks: List[Dict], year: int, months: BreakoutMonths) -> List[Dict]:
         """
         Scan multiple stocks in parallel using ThreadPoolExecutor.
 
         Args:
             stocks: List of stock dicts with symbol, company_name, listing_date
             year: IPO year
-            target_month: Optional month number override for reference month.
-            target_year_override: Optional year for the reference month.
+            months: Breakout and previous month (see breakout_months)
 
         Returns:
             List of result dicts for each stock
@@ -264,7 +286,7 @@ class ScannerService:
 
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             future_to_stock = {
-                executor.submit(self._scan_single_stock, stock, year, target_month, target_year_override): stock
+                executor.submit(self._scan_single_stock, stock, year, months): stock
                 for stock in stocks
             }
 
@@ -287,20 +309,22 @@ class ScannerService:
 
         return results
 
-    def _scan_single_stock(self, stock: Dict, year: int, target_month: int = None, target_year_override: int = None) -> Dict:
+    def _scan_single_stock(self, stock: Dict, year: int, months: BreakoutMonths) -> Dict:
         """
-        Scan a single stock for the IPO breakout condition.
+        Scan a single stock for a fresh IPO breakout:
+          1. the previous month closed below the IPO first-month high, and
+          2. the breakout month (live price while it runs) is at or above it.
         Fully protected against bad data from yfinance.
 
         Args:
             stock: Dict with symbol, company_name, listing_date
             year: IPO year (0 = all years)
-            target_month: Optional specific month to use as reference (overrides auto-detect).
-            target_year_override: Optional year for the reference month.
+            months: Breakout and previous month (see breakout_months)
          Returns:
             Result dict with all screening data. "skip_reason" is set (see SKIP_*)
             when the stock could not be compared against its IPO-month high.
         """
+        breakout_month, prev_month, live = months
         symbol = stock.get("symbol", "UNKNOWN")
         yf_symbol = f"{symbol}.NS"
 
@@ -381,12 +405,9 @@ class ScannerService:
                 result["skip_reason"] = SKIP_NO_LISTING_MONTH
                 return result
 
-            if len(monthly_data) < 2:
-                logger.warning(f"Insufficient data for {symbol} (only {len(monthly_data)} months)")
-                result["skip_reason"] = SKIP_NO_DATA
-                return result
-
-            # Step 1: Get the first listed month's HIGH, to the paisa like NSE quotes
+            # Step 1: Get the first listed month's HIGH, to the paisa like NSE quotes.
+            # Prices are rounded to the paisa throughout so Yahoo's float noise
+            # (304.6499938...) cannot decide a stock sitting exactly at its IPO high.
             first_month_high = safe_round(monthly_data["High"].iloc[0])
             if first_month_high is None or first_month_high <= 0:
                 logger.warning(f"Invalid first month high for {symbol}: {monthly_data['High'].iloc[0]}")
@@ -395,85 +416,53 @@ class ScannerService:
 
             result["ipo_first_month_high"] = first_month_high
 
-            # Get current price
-            current_price = None
-            if target_month is not None and target_year_override is not None:
-                # Bot 2: Current price is the close of the selected target month,
-                # which has to come after the IPO month
-                if (target_year_override, target_month) > (first_month.year, first_month.month):
-                    for idx, row in monthly_data.iterrows():
-                        if idx.year == target_year_override and idx.month == target_month:
-                            current_price = safe_float(row["Close"])
-                            break
-            else:
-                # Bot 1: Get real-time current price via fast_info to avoid end-of-month / start-of-month yf bugs
-                try:
-                    current_price = safe_float(yf.Ticker(yf_symbol).fast_info.get("lastPrice"))
-                except Exception as e:
-                    logger.warning(f"fast_info failed for {symbol}: {e}")
-                if current_price is None:
-                    current_price = safe_float(monthly_data["Close"].iloc[-1])
-
-            # Compare to the paisa: Yahoo's float noise (304.6499938...) must not
-            # decide whether a stock sitting exactly at its IPO high qualifies
-            current_price = safe_round(current_price)
-            if current_price is not None and current_price > 0:
-                result["current_price"] = current_price
-            else:
-                current_price = None
-                result["skip_reason"] = SKIP_NO_PRICE
-
-            # Explicitly find the PREVIOUS month's close
-            today = now_ist()
-            if target_month is not None and target_year_override is not None:
-                # Bot 2: Previous month is target_month minus 1
-                if target_month == 1:
-                    prev_month_year = target_year_override - 1
-                    prev_month_month = 12
-                else:
-                    prev_month_year = target_year_override
-                    prev_month_month = target_month - 1
-            elif today.month == 1:
-                prev_month_year = today.year - 1
-                prev_month_month = 12
-            else:
-                prev_month_year = today.year
-                prev_month_month = today.month - 1
-
-            prev_close = None
-            breakout_month_str = None
-            for idx, row in monthly_data.iterrows():
-                if idx.year == prev_month_year and idx.month == prev_month_month:
-                    prev_close = safe_float(row["Close"])
-                    breakout_month_str = idx.strftime("%Y-%m")
-                    break
-
-            if prev_close is not None and prev_close > 0:
-                result["previous_month_close"] = safe_round(prev_close)
-
             # Update listing date from data if not available
             if result["listing_date"] is None:
                 result["listing_date"] = monthly_data.index[0]
 
-            # Step 2: Qualify if current price >= IPO first month high
-            # (stock is trading above its IPO listing high — regardless of where it was last month)
-            prev_close = result.get("previous_month_close")
+            # The previous month has to be the IPO month or later
+            if prev_month < (first_month.year, first_month.month):
+                result["skip_reason"] = SKIP_TOO_RECENT
+                return result
 
-            # Always set breakout_month and breakout_close when we have prev data
-            if prev_close is not None:
+            closes = {(idx.year, idx.month): row["Close"] for idx, row in monthly_data.iterrows()}
+
+            # Condition 1: the previous month closed below the IPO first-month high
+            prev_close = safe_round(closes.get(prev_month))
+            if prev_close is None or prev_close <= 0:
+                logger.warning(f"No close for {prev_month[0]}-{prev_month[1]:02d} for {symbol}")
+                result["skip_reason"] = SKIP_NO_DATA
+                return result
+
+            result["previous_month_close"] = prev_close
+            if prev_close >= first_month_high:
+                return result  # Already at/above its IPO high last month: not a fresh breakout
+
+            # Condition 2: the breakout month is at or above the IPO first-month high
+            current_price = None
+            if live:
+                # Live price via fast_info to avoid end-of-month / start-of-month yf bugs
                 try:
-                    result["breakout_month"] = breakout_month_str if breakout_month_str else "Unknown"
-                except Exception:
-                    result["breakout_month"] = "Unknown"
-                result["breakout_close"] = prev_close
+                    current_price = safe_float(yf.Ticker(yf_symbol).fast_info.get("lastPrice"))
+                except Exception as e:
+                    logger.warning(f"fast_info failed for {symbol}: {e}")
+            if current_price is None:
+                current_price = closes.get(breakout_month)
 
-            if current_price is not None:
-                if current_price >= first_month_high:
-                    result["qualified"] = True
+            current_price = safe_round(current_price)
+            if current_price is None or current_price <= 0:
+                logger.warning(f"No price for {breakout_month[0]}-{breakout_month[1]:02d} for {symbol}")
+                result["skip_reason"] = SKIP_NO_DATA
+                return result
 
-                result["pct_above_ipo_high"] = safe_round(
-                    ((current_price - first_month_high) / first_month_high) * 100
-                )
+            result["current_price"] = current_price
+            result["pct_above_ipo_high"] = safe_round(
+                ((current_price - first_month_high) / first_month_high) * 100
+            )
+            if current_price >= first_month_high:
+                result["qualified"] = True
+                result["breakout_month"] = f"{breakout_month[0]}-{breakout_month[1]:02d}"
+                result["breakout_close"] = current_price
 
             return result
 
@@ -553,8 +542,8 @@ class ScannerService:
 
         return None
 
-    def _build_summary(self, job: ScanJob, results: List[Dict]) -> Dict:
-        """Build a summary dict from scan results."""
+    def _build_summary(self, job: ScanJob, results: List[Dict], months: BreakoutMonths) -> Dict:
+        """Build a summary dict from scan results for the given breakout months."""
         skipped: Dict[str, int] = {}
         for r in results:
             if r.get("skip_reason"):
@@ -573,10 +562,14 @@ class ScannerService:
         if checked:
             qualification_pct = round((len(qualified) / len(checked)) * 100, 2)
 
+        breakout_month, prev_month, live = months
         return {
             "scan_id": job.id,
             "year": job.year,
             "status": job.status,
+            "breakout_month": breakout_month,
+            "previous_month": prev_month,
+            "live": live,
             "total_listed": job.total_stocks or 0,
             "total_scanned": len(checked),
             "qualified_count": len(qualified),

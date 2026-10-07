@@ -11,20 +11,25 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 # Point at the test database before any app module reads settings
 os.environ.setdefault("DATABASE_URL", "sqlite:///./test_db.db")
 
-from app.services.scanner_service import SKIP_NO_LISTING_MONTH, SKIP_NO_PRICE, SKIP_OLDER_LISTING
+from app.services.scanner_service import SKIP_NO_LISTING_MONTH, SKIP_OLDER_LISTING, SKIP_TOO_RECENT
 from app.services.telegram_service import format_scan_summary, send_telegram_message, split_message
 
 
 SUMMARY = {
-    "year": 2024,
-    "total_listed": 144,
-    "total_scanned": 131,
+    "year": 2026,
+    "breakout_month": (2026, 10),
+    "previous_month": (2026, 9),
+    "live": True,
+    "total_listed": 382,
+    "total_scanned": 97,
     "qualified_count": 2,
-    "skipped": {SKIP_OLDER_LISTING: 3, SKIP_NO_LISTING_MONTH: 1},
+    "skipped": {SKIP_OLDER_LISTING: 276, SKIP_NO_LISTING_MONTH: 1},
     "no_listing_month_symbols": ["HAL"],
     "qualified_list": [
-        {"symbol": "M&M", "current_price": 3047.8, "ipo_first_month_high": 727.0, "pct_above_ipo_high": 319.23},
-        {"symbol": "SWIGGY", "current_price": 456.0, "ipo_first_month_high": 456.0, "pct_above_ipo_high": 0.0},
+        {"symbol": "M&M", "ipo_first_month_high": 727.0, "previous_month_close": 700.0,
+         "current_price": 750.0, "pct_above_ipo_high": 3.16},
+        {"symbol": "SWIGGY", "ipo_first_month_high": 456.0, "previous_month_close": 440.0,
+         "current_price": 456.0, "pct_above_ipo_high": 0.0},
     ],
 }
 
@@ -32,29 +37,37 @@ SUMMARY = {
 class TestFormatScanSummary:
     """Test the scan result message."""
 
-    def test_lists_prices_for_each_qualified_stock(self):
+    def test_states_the_breakout_rule(self):
         msg = format_scan_summary(SUMMARY)
 
-        assert "(Current price vs IPO first-month high)" in msg
-        assert "1. <b>M&amp;M</b> ₹3,047.80 vs ₹727.00 (+319.23%)" in msg
-        assert "2. <b>SWIGGY</b> ₹456.00 vs ₹456.00 (+0.00%)" in msg
+        assert "Breakout Month: <b>October 2026</b> (live price)" in msg
+        assert "Rule: September 2026 close below the IPO first-month high, current price at or above it" in msg
+
+    def test_lists_all_three_prices_for_each_qualified_stock(self):
+        msg = format_scan_summary(SUMMARY)
+
+        assert "1. <b>M&amp;M</b> IPO high ₹727.00 | Sep close ₹700.00 | Now ₹750.00 (+3.16%)" in msg
+        assert "2. <b>SWIGGY</b> IPO high ₹456.00 | Sep close ₹440.00 | Now ₹456.00 (+0.00%)" in msg
 
     def test_reports_checked_count_and_skip_reasons(self):
-        msg = format_scan_summary(SUMMARY)
+        msg = format_scan_summary({**SUMMARY, "skipped": {**SUMMARY["skipped"], SKIP_TOO_RECENT: 3}})
 
-        assert "IPOs checked: <b>131</b> (of 144 NSE listings)" in msg
-        assert "• 3 were already trading before their IPO year" in msg
+        assert "IPOs checked: <b>97</b> (of 382 NSE listings)" in msg
+        assert "• 276 were already trading before their IPO year" in msg
         assert "• 1 have no price data for their listing month: HAL" in msg
+        assert "• 3 listed in October 2026, so there is no September 2026 close to compare" in msg
         assert "Excel" not in msg
 
-    def test_all_years_with_reference_month(self):
-        summary = {**SUMMARY, "year": 0, "skipped": {SKIP_NO_PRICE: 4}}
-        msg = format_scan_summary(summary, reference_month="September 2026")
+    def test_selected_month_uses_closes(self):
+        summary = {**SUMMARY, "year": 0, "breakout_month": (2026, 8), "previous_month": (2026, 7),
+                   "live": False, "skipped": {SKIP_TOO_RECENT: 4}}
+        msg = format_scan_summary(summary)
 
         assert "IPO Year: <b>ALL</b>" in msg
-        assert "Reference Month: <b>September 2026</b>" in msg
-        assert "(September 2026 close vs IPO first-month high)" in msg
-        assert "• 4 have no September 2026 close" in msg
+        assert "Breakout Month: <b>August 2026</b>\n" in msg
+        assert "Rule: July 2026 close below the IPO first-month high, August 2026 close at or above it" in msg
+        assert "| Jul close ₹700.00 | Aug close ₹750.00 (+3.16%)" in msg
+        assert "• 4 listed in August 2026 or later, so there is no July 2026 close to compare" in msg
 
     def test_names_at_most_ten_symbols_without_listing_month_data(self):
         symbols = [f"S{i}" for i in range(13)]

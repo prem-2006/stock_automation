@@ -4,9 +4,10 @@ Telegram Messaging Service.
 Handles sending text messages to Telegram users and formatting scan results.
 """
 
+import calendar
 import html
 import time
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 import httpx
 
@@ -14,8 +15,8 @@ from app.config import get_settings
 from app.services.scanner_service import (
     SKIP_NO_DATA,
     SKIP_NO_LISTING_MONTH,
-    SKIP_NO_PRICE,
     SKIP_OLDER_LISTING,
+    SKIP_TOO_RECENT,
 )
 from app.utils.logger import get_logger
 
@@ -92,27 +93,30 @@ def _price(value) -> str:
     return f"₹{value:,.2f}" if isinstance(value, (int, float)) else "N/A"
 
 
-def format_scan_summary(summary: dict, reference_month: Optional[str] = None) -> str:
+def _month(year_month: Tuple[int, int], short: bool = False) -> str:
+    year, month = year_month
+    return calendar.month_abbr[month] if short else f"{calendar.month_name[month]} {year}"
+
+
+def format_scan_summary(summary: dict) -> str:
     """
     Format a scan summary as a Telegram HTML message.
 
     Args:
         summary: Scan summary dict from ScannerService
-        reference_month: e.g. "September 2026" when prices are that month's
-            close (Bot 2); None when prices are current (Bot 1)
 
     Returns:
         Formatted message string
     """
     year = summary.get("year")
+    breakout, previous, live = summary["breakout_month"], summary["previous_month"], summary.get("live")
     lines = [
         "📊 <b>IPO Breakout Scan Complete</b>",
         "",
         f"📅 IPO Year: <b>{'ALL' if year == 0 else year}</b>",
-    ]
-    if reference_month:
-        lines.append(f"🗓 Reference Month: <b>{reference_month}</b>")
-    lines += [
+        f"🗓 Breakout Month: <b>{_month(breakout)}</b>" + (" (live price)" if live else ""),
+        f"📏 Rule: {_month(previous)} close below the IPO first-month high, "
+        f"{'current price' if live else _month(breakout) + ' close'} at or above it",
         f"🔍 IPOs checked: <b>{summary.get('total_scanned', 0)}</b>"
         f" (of {summary.get('total_listed', 0)} NSE listings)",
         f"✅ Qualified: <b>{summary.get('qualified_count', 0)}</b>",
@@ -120,14 +124,15 @@ def format_scan_summary(summary: dict, reference_month: Optional[str] = None) ->
 
     qualified = summary.get("qualified_list", [])
     if qualified:
-        price_label = f"{reference_month} close" if reference_month else "Current price"
-        lines += ["", f"🏆 <b>Qualified Stocks</b> ({price_label} vs IPO first-month high):"]
+        now_label = "Now" if live else f"{_month(breakout, short=True)} close"
+        lines += ["", "🏆 <b>Qualified Stocks:</b>"]
         for i, stock in enumerate(qualified, 1):
             pct = stock.get("pct_above_ipo_high") or 0
             lines.append(
                 f"{i}. <b>{html.escape(str(stock.get('symbol', 'N/A')))}</b> "
-                f"{_price(stock.get('current_price'))} vs {_price(stock.get('ipo_first_month_high'))} "
-                f"({pct:+.2f}%)"
+                f"IPO high {_price(stock.get('ipo_first_month_high'))} | "
+                f"{_month(previous, short=True)} close {_price(stock.get('previous_month_close'))} | "
+                f"{now_label} {_price(stock.get('current_price'))} ({pct:+.2f}%)"
             )
 
     skipped = summary.get("skipped") or {}
@@ -135,9 +140,9 @@ def format_scan_summary(summary: dict, reference_month: Optional[str] = None) ->
         labels = {
             SKIP_OLDER_LISTING: "were already trading before their IPO year (not fresh IPOs)",
             SKIP_NO_LISTING_MONTH: "have no price data for their listing month",
-            SKIP_NO_PRICE: (
-                f"have no {reference_month} close (listed in or after that month)"
-                if reference_month else "have no current price"
+            SKIP_TOO_RECENT: (
+                f"listed in {_month(breakout)}{'' if live else ' or later'}, "
+                f"so there is no {_month(previous)} close to compare"
             ),
             SKIP_NO_DATA: "have no price data on Yahoo Finance",
         }
