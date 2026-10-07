@@ -4,8 +4,11 @@ IPO Breakout Scanner Service.
 Core screening engine that:
 1. Fetches monthly OHLC data for each stock using yfinance
 2. Identifies the first listed month's HIGH
-3. Checks for monthly close breakout above IPO HIGH
+3. Checks whether the stock now trades at or above that IPO HIGH
 4. Generates results with parallel processing
+
+All prices are actual traded prices (adjusted for splits/bonuses, NOT for
+dividends), so every number matches what NSE / TradingView charts show.
 
 Fully hardened against:
 - NaN / Inf / missing data from yfinance
@@ -19,8 +22,8 @@ import random
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime, UTC
-from typing import List, Dict, Optional, Tuple
+from datetime import datetime, timedelta, timezone, UTC
+from typing import List, Dict, Optional
 
 import pandas as pd
 import yfinance as yf
@@ -29,10 +32,23 @@ from app.config import get_settings
 from app.database import get_session_factory
 from app.models import ScanJob, ScanResult
 from app.services.nse_service import NSEService
-from app.services.excel_service import ExcelService
 from app.utils.logger import get_logger
 
 logger = get_logger("scanner")
+
+# NSE runs on Indian Standard Time (no DST); the server itself may be on UTC.
+IST = timezone(timedelta(hours=5, minutes=30))
+
+# Why a stock was left out of the comparison (result["skip_reason"])
+SKIP_OLDER_LISTING = "older_listing"            # traded on NSE/BSE before its IPO year: not a fresh IPO
+SKIP_NO_LISTING_MONTH = "no_listing_month_data"  # price data does not cover the listing month
+SKIP_NO_PRICE = "no_price"                       # no current price / reference-month close
+SKIP_NO_DATA = "no_data"                         # no or insufficient price data
+
+
+def now_ist() -> datetime:
+    """Current date and time in IST."""
+    return datetime.now(IST)
 
 
 def safe_float(v):
@@ -62,7 +78,6 @@ class ScannerService:
     def __init__(self):
         self.settings = get_settings()
         self.nse_service = NSEService()
-        self.excel_service = ExcelService()
 
     def create_scan_job(self, year: int, phone_number: Optional[str] = None) -> str:
         """
@@ -70,7 +85,7 @@ class ScannerService:
 
         Args:
             year: IPO year to scan
-            phone_number: Optional WhatsApp number for results delivery
+            phone_number: Optional chat identifier for results delivery
 
         Returns:
             Scan job ID (UUID)
@@ -146,9 +161,6 @@ class ScannerService:
             results = self._scan_stocks_parallel(stocks, year, target_month=target_month, target_year_override=target_year_override)
 
             # Step 3: Save results to database — one by one, skip failures
-            qualified_results = []
-            saved_count = 0
-
             for result in results:
                 try:
                     # Convert listing_date to native python datetime for SQLite
@@ -181,10 +193,6 @@ class ScannerService:
                     )
                     session.add(scan_result)
                     session.flush()  # Flush each record to catch errors immediately
-                    saved_count += 1
-
-                    if result.get("qualified"):
-                        qualified_results.append(result)
 
                 except Exception as e:
                     session.rollback()  # Rollback the failed single insert
@@ -195,35 +203,20 @@ class ScannerService:
                     job = session.query(ScanJob).filter_by(id=scan_id).first()
                     continue
 
-            job.scanned_stocks = saved_count
-            session.commit()
-
-            # Step 4: Generate Excel report (protected)
-            report_path = None
-            try:
-                report_path = self.excel_service.generate_report(
-                    year=year,
-                    scan_id=scan_id,
-                    results=results,
-                    qualified_results=qualified_results,
-                )
-            except Exception as e:
-                logger.error(f"Excel report generation failed: {e}", exc_info=True)
-                # Continue anyway — user still gets text results
-
-            # Step 5: Update job status
+            # Step 4: Update job status
+            checked = [r for r in results if not r.get("skip_reason")]
             job.status = "completed"
-            job.qualified_stocks = len(qualified_results)
-            job.report_path = report_path
+            job.scanned_stocks = len(checked)
+            job.qualified_stocks = sum(1 for r in checked if r.get("qualified"))
             job.completed_at = datetime.now(UTC)
             session.commit()
 
             logger.info(
-                f"Scan completed for year {year}: "
-                f"{len(results)} scanned, {len(qualified_results)} qualified"
+                f"Scan completed for year {year}: {len(results)} listed, "
+                f"{job.scanned_stocks} checked, {job.qualified_stocks} qualified"
             )
 
-            return self._build_summary(job, qualified_results)
+            return self._build_summary(job, results)
 
         except Exception as e:
             # Top-level catch — always rollback first, then try to mark job as failed
@@ -289,6 +282,7 @@ class ScannerService:
                         "company_name": stock.get("company_name", "Unknown"),
                         "qualified": False,
                         "error": str(e)[:200],
+                        "skip_reason": SKIP_NO_DATA,
                     })
 
         return results
@@ -300,11 +294,12 @@ class ScannerService:
 
         Args:
             stock: Dict with symbol, company_name, listing_date
-            year: IPO year
+            year: IPO year (0 = all years)
             target_month: Optional specific month to use as reference (overrides auto-detect).
             target_year_override: Optional year for the reference month.
          Returns:
-            Result dict with all screening data
+            Result dict with all screening data. "skip_reason" is set (see SKIP_*)
+            when the stock could not be compared against its IPO-month high.
         """
         symbol = stock.get("symbol", "UNKNOWN")
         yf_symbol = f"{symbol}.NS"
@@ -321,6 +316,7 @@ class ScannerService:
             "previous_month_close": None,
             "current_price": None,
             "pct_above_ipo_high": None,
+            "skip_reason": None,
         }
 
         # Rate limiting with jitter to avoid Yahoo Finance rate limiting
@@ -333,6 +329,7 @@ class ScannerService:
 
             if monthly_data is None or monthly_data.empty:
                 logger.warning(f"No monthly data for {symbol}")
+                result["skip_reason"] = SKIP_NO_DATA
                 return result
 
             # Handle MultiIndex columns from yfinance
@@ -343,55 +340,91 @@ class ScannerService:
             required_cols = {"High", "Close"}
             if not required_cols.issubset(set(monthly_data.columns)):
                 logger.warning(f"Missing required columns for {symbol}: {monthly_data.columns.tolist()}")
+                result["skip_reason"] = SKIP_NO_DATA
                 return result
 
             # Drop rows where High or Close is NaN
             monthly_data = monthly_data.dropna(subset=["High", "Close"])
 
+            if monthly_data.empty:
+                logger.warning(f"No valid monthly candles for {symbol}")
+                result["skip_reason"] = SKIP_NO_DATA
+                return result
+
+            # The year the stock must have IPO'd in: its NSE listing year
+            # (an ALL scan holds every stock to its own listing year).
+            listing = self._to_timestamp(stock.get("listing_date"))
+            ipo_year = listing.year if listing is not None else (year or None)
+
+            # Strict IPO year check: reject stocks that traded before their IPO year.
+            # BSE history counts too, because old BSE companies show up in the NSE
+            # list with a recent "listing date" once they start trading on NSE.
+            if ipo_year is None or monthly_data.index[0].year >= ipo_year:
+                bse_earlier = self._fetch_bse_months_before(symbol, monthly_data.index[0])
+                if bse_earlier is not None:
+                    monthly_data = pd.concat([bse_earlier, monthly_data])
+
+            first_month = monthly_data.index[0]
+            if ipo_year is not None and first_month.year < ipo_year:
+                logger.info(f"Skipping {symbol}: trading since {first_month:%Y-%m}, before IPO year {ipo_year}")
+                result["error"] = f"Older listing ({first_month:%Y-%m})"
+                result["skip_reason"] = SKIP_OLDER_LISTING
+                return result
+
+            # The first candle must be the listing month, otherwise its HIGH is not the IPO-month high
+            if listing is not None and (first_month.year, first_month.month) > (listing.year, listing.month):
+                logger.info(
+                    f"Skipping {symbol}: no price data for listing month {listing:%Y-%m} "
+                    f"(data starts {first_month:%Y-%m})"
+                )
+                result["error"] = f"No data for listing month {listing:%Y-%m}"
+                result["skip_reason"] = SKIP_NO_LISTING_MONTH
+                return result
+
             if len(monthly_data) < 2:
                 logger.warning(f"Insufficient data for {symbol} (only {len(monthly_data)} months)")
+                result["skip_reason"] = SKIP_NO_DATA
                 return result
 
-            # Strict IPO Year Check: Reject cross-listed stocks that traded before the requested year
-            first_yf_date = monthly_data.index[0]
-            first_yf_year = first_yf_date.year
-
-            if first_yf_year < year:
-                logger.info(f"Skipping {symbol}: True IPO was in {first_yf_year}, before requested year {year}")
-                result["error"] = f"Older IPO ({first_yf_year})"
-                return result
-
-            # Step 1: Get the first listed month's HIGH
-            first_month_high = safe_float(monthly_data["High"].iloc[0])
+            # Step 1: Get the first listed month's HIGH, to the paisa like NSE quotes
+            first_month_high = safe_round(monthly_data["High"].iloc[0])
             if first_month_high is None or first_month_high <= 0:
                 logger.warning(f"Invalid first month high for {symbol}: {monthly_data['High'].iloc[0]}")
+                result["skip_reason"] = SKIP_NO_DATA
                 return result
 
-            result["ipo_first_month_high"] = safe_round(first_month_high)
+            result["ipo_first_month_high"] = first_month_high
 
             # Get current price
+            current_price = None
             if target_month is not None and target_year_override is not None:
-                # Bot 2: Current price is the close of the selected target month
-                current_price = None
-                for idx, row in monthly_data.iterrows():
-                    if idx.year == target_year_override and idx.month == target_month:
-                        current_price = safe_float(row["Close"])
-                        break
+                # Bot 2: Current price is the close of the selected target month,
+                # which has to come after the IPO month
+                if (target_year_override, target_month) > (first_month.year, first_month.month):
+                    for idx, row in monthly_data.iterrows():
+                        if idx.year == target_year_override and idx.month == target_month:
+                            current_price = safe_float(row["Close"])
+                            break
             else:
                 # Bot 1: Get real-time current price via fast_info to avoid end-of-month / start-of-month yf bugs
                 try:
-                    import yfinance as yf
-                    t = yf.Ticker(yf_symbol)
-                    current_price = safe_float(t.fast_info.get('lastPrice'))
+                    current_price = safe_float(yf.Ticker(yf_symbol).fast_info.get("lastPrice"))
                 except Exception as e:
                     logger.warning(f"fast_info failed for {symbol}: {e}")
+                if current_price is None:
                     current_price = safe_float(monthly_data["Close"].iloc[-1])
 
+            # Compare to the paisa: Yahoo's float noise (304.6499938...) must not
+            # decide whether a stock sitting exactly at its IPO high qualifies
+            current_price = safe_round(current_price)
             if current_price is not None and current_price > 0:
-                result["current_price"] = safe_round(current_price)
-                
+                result["current_price"] = current_price
+            else:
+                current_price = None
+                result["skip_reason"] = SKIP_NO_PRICE
+
             # Explicitly find the PREVIOUS month's close
-            today = datetime.now()
+            today = now_ist()
             if target_month is not None and target_year_override is not None:
                 # Bot 2: Previous month is target_month minus 1
                 if target_month == 1:
@@ -438,24 +471,56 @@ class ScannerService:
                 if current_price >= first_month_high:
                     result["qualified"] = True
 
-                if first_month_high > 0:
-                    result["pct_above_ipo_high"] = safe_round(
-                        ((current_price - first_month_high) / first_month_high) * 100
-                    )
+                result["pct_above_ipo_high"] = safe_round(
+                    ((current_price - first_month_high) / first_month_high) * 100
+                )
 
             return result
 
         except Exception as e:
             logger.error(f"Error processing {symbol}: {e}")
             result["error"] = str(e)[:200]
+            result["qualified"] = False
+            result["skip_reason"] = SKIP_NO_DATA
             return result
 
-    def _fetch_monthly_data(self, yf_symbol: str) -> Optional[pd.DataFrame]:
+    @staticmethod
+    def _to_timestamp(value) -> Optional[pd.Timestamp]:
+        """Parse a listing date (str / datetime / Timestamp) to a Timestamp; None if missing or invalid."""
+        if value is None:
+            return None
+        try:
+            ts = pd.Timestamp(value)
+        except (ValueError, TypeError):
+            return None
+        return None if pd.isna(ts) else ts
+
+    def _fetch_bse_months_before(self, symbol: str, before: pd.Timestamp) -> Optional[pd.DataFrame]:
+        """
+        BSE monthly candles strictly before `before` (the first NSE candle), or None.
+
+        A result means the company was already trading on BSE before its NSE data
+        starts, i.e. its NSE listing was not its IPO.
+        """
+        data = self._fetch_monthly_data(f"{symbol}.BO", retry_on_empty=False)
+        if data is None or not {"High", "Close"}.issubset(data.columns):
+            return None
+        earlier = data[data.index < before].dropna(subset=["High", "Close"])
+        return earlier if not earlier.empty else None
+
+    def _fetch_monthly_data(self, yf_symbol: str, retry_on_empty: bool = True) -> Optional[pd.DataFrame]:
         """
         Fetch monthly OHLC data from yfinance with retry logic.
 
+        Prices are actual traded prices: adjusted for splits/bonuses but NOT for
+        dividends. yfinance's default (auto_adjust=True) also scales old prices
+        down by every dividend paid since, which understates the IPO-month high
+        against today's real price and inflates "% above IPO high".
+
         Args:
             yf_symbol: Yahoo Finance symbol (e.g., 'RELIANCE.NS')
+            retry_on_empty: Retry when Yahoo returns no rows. False when an empty
+                result is expected (e.g. a stock that is not listed on BSE).
 
         Returns:
             DataFrame with monthly OHLC data or None
@@ -463,15 +528,17 @@ class ScannerService:
         for attempt in range(1, self.settings.MAX_RETRIES + 1):
             try:
                 ticker = yf.Ticker(yf_symbol)
-                data = ticker.history(period="max", interval="1mo")
+                data = ticker.history(period="max", interval="1mo", auto_adjust=False)
 
                 if data is not None and not data.empty:
                     # Remove rows with all NaN values
                     data = data.dropna(how="all")
                     if not data.empty:
                         return data
-                else:
-                    logger.warning(f"Empty data for {yf_symbol} on attempt {attempt}")
+
+                if not retry_on_empty:
+                    return None
+                logger.warning(f"Empty data for {yf_symbol} on attempt {attempt}")
 
             except Exception as e:
                 logger.warning(
@@ -486,31 +553,39 @@ class ScannerService:
 
         return None
 
-    def _build_summary(self, job: ScanJob, qualified_results: List[Dict]) -> Dict:
+    def _build_summary(self, job: ScanJob, results: List[Dict]) -> Dict:
         """Build a summary dict from scan results."""
+        skipped: Dict[str, int] = {}
+        for r in results:
+            if r.get("skip_reason"):
+                skipped[r["skip_reason"]] = skipped.get(r["skip_reason"], 0) + 1
+
+        checked = [r for r in results if not r.get("skip_reason")]
+
         # Sort qualified results by % above IPO high (descending)
-        sorted_qualified = sorted(
-            qualified_results,
+        qualified = sorted(
+            (r for r in checked if r.get("qualified")),
             key=lambda x: safe_float(x.get("pct_above_ipo_high")) or 0,
             reverse=True,
         )
 
         qualification_pct = 0.0
-        total = job.total_stocks or 0
-        if total > 0:
-            qualification_pct = round(
-                (len(qualified_results) / total) * 100, 2
-            )
+        if checked:
+            qualification_pct = round((len(qualified) / len(checked)) * 100, 2)
 
         return {
             "scan_id": job.id,
             "year": job.year,
             "status": job.status,
-            "total_scanned": total,
-            "qualified_count": len(qualified_results),
+            "total_listed": job.total_stocks or 0,
+            "total_scanned": len(checked),
+            "qualified_count": len(qualified),
             "qualification_pct": qualification_pct,
-            "report_path": job.report_path,
-            "qualified_list": sorted_qualified,
+            "skipped": skipped,
+            "no_listing_month_symbols": sorted(
+                r["symbol"] for r in results if r.get("skip_reason") == SKIP_NO_LISTING_MONTH
+            ),
+            "qualified_list": qualified,
         }
 
     def get_scan_status(self, scan_id: str) -> Optional[Dict]:
@@ -530,7 +605,6 @@ class ScannerService:
                 "total_stocks": job.total_stocks,
                 "scanned_stocks": job.scanned_stocks,
                 "qualified_stocks": job.qualified_stocks,
-                "report_path": job.report_path,
                 "error_message": job.error_message,
                 "created_at": job.created_at.isoformat() if job.created_at else None,
                 "completed_at": job.completed_at.isoformat() if job.completed_at else None,

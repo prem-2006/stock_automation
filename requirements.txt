@@ -12,7 +12,6 @@ python-multipart>=0.0.9
 yfinance>=0.2.40
 pandas>=2.1.0
 numpy>=1.26.0
-openpyxl>=3.1.0
 
 # --- Database ---
 sqlalchemy>=2.0.30

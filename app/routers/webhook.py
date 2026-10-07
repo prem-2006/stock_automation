@@ -6,6 +6,7 @@ Implements a state machine for the chat flow:
   idle → awaiting_year → processing → completed
 """
 
+import html
 import os
 import threading
 import traceback
@@ -19,7 +20,7 @@ from sqlalchemy.orm import Session
 from app.database import get_db, get_session_factory
 from app.models import Conversation, ScanJob
 from app.services.scanner_service import ScannerService
-from app.services.telegram_service import TelegramService
+from app.services.telegram_service import TelegramService, format_scan_summary
 from app.config import get_settings
 from app.utils.logger import get_logger
 
@@ -76,37 +77,17 @@ def _process_scan_and_notify(scan_id: str, chat_id: str) -> None:
     """
     Background worker:
     1. Runs the scan (which saves to DB).
-    2. Builds the Excel report.
-    3. Sends the Telegram notification + file.
+    2. Sends the results to the user on Telegram.
     """
     try:
         logger.info(f"Background scan started for job {scan_id}")
 
-        # Run scan
         summary = scanner_service.run_scan(scan_id)
+        telegram_service.send_message(int(chat_id), format_scan_summary(summary))
 
-        # Format summary message
-        message = telegram_service.format_scan_summary(summary)
-
-        # Generate Excel report
-        try:
-            report_path = summary.get("report_path")
-
-            if report_path and os.path.exists(report_path):
-                # Send the long text message first
-                telegram_service.send_message(int(chat_id), message)
-                # Send the document separately with a short caption
-                telegram_service.send_document(int(chat_id), report_path, "📎 Your detailed Excel report")
-            else:
-                # Fallback if report failed
-                telegram_service.send_message(int(chat_id), message)
-                
-        except Exception as e:
-            logger.error(f"Failed to attach report for scan {scan_id}: {e}")
-            telegram_service.send_message(int(chat_id), message + f"\n\n⚠️ Failed to generate Excel report: {e}")
-
-    except Exception as notify_err:
-        logger.error(f"Failed to send error notification: {notify_err}")
+    except Exception as e:
+        logger.error(f"Background scan failed for job {scan_id}: {e}", exc_info=True)
+        telegram_service.send_message(int(chat_id), f"❌ Scan failed: {html.escape(str(e))}")
 
     finally:
         # Reset conversation state
@@ -206,7 +187,7 @@ async def telegram_webhook(
                     int(chat_id),
                     scan_msg +
                     f"⏳ This may take a few minutes depending on the number of stocks.\n"
-                    f"I'll send you the results with an Excel report once done."
+                    f"I'll send you the results once done."
                 )
 
                 if IS_VERCEL:
@@ -238,7 +219,7 @@ async def telegram_webhook(
             telegram_service.send_message(
                 int(chat_id),
                 "⏳ Your previous scan is still running.\n\n"
-                "Please wait for it to finish. You'll receive the report shortly!"
+                "Please wait for it to finish. You'll receive the results shortly!"
             )
 
         elif conv.current_state == "completed":

@@ -37,7 +37,7 @@ COPY --from=builder /usr/local/bin /usr/local/bin
 COPY . .
 
 # Create necessary directories
-RUN mkdir -p db data logs app/static/reports
+RUN mkdir -p db data logs
 
 # Create non-root user for security
 RUN adduser --disabled-password --gecos "" appuser && \

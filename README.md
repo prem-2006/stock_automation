@@ -1,6 +1,6 @@
 # 📊 IPO Breakout Stock Screener
 
-A production-ready WhatsApp bot that screens NSE-listed stocks by IPO year, identifies stocks that broke above their first-month listing high, generates professional Excel reports, and delivers results via WhatsApp.
+A production-ready bot that screens NSE-listed stocks by IPO year, identifies stocks trading at or above their first-month listing high, and delivers the results as a chat message.
 
 ---
 
@@ -19,22 +19,26 @@ WhatsApp Message (Twilio)
   yfinance API (Monthly OHLC Data)
         ↓
   Breakout Condition Check
-  (Monthly Close > IPO First Month High)
+  (Current Price >= IPO First Month High)
         ↓
-  Excel Report Generation (openpyxl)
-        ↓
-  WhatsApp Reply + Excel Attachment
+  Chat Reply with Qualified Stocks
 ```
 
 ## 📋 Screening Logic
 
-For each stock listed in the entered IPO year:
+For each stock listed on NSE in the entered IPO year:
 
-1. Fetch monthly OHLC data from listing date to current date
-2. Record the **first listed month's HIGH** as `IPO_FIRST_MONTH_HIGH`
-3. Check every subsequent monthly candle:
-   - **IF** `Monthly_Close > IPO_FIRST_MONTH_HIGH` **→ Stock Qualifies**
-4. Record the breakout month, close price, current price, and % gain
+1. Fetch monthly OHLC data with **actual traded prices** (split/bonus-adjusted, not
+   dividend-adjusted), so every number matches NSE / TradingView charts
+2. Skip stocks that are not fresh IPOs: anything that traded on NSE or BSE before the
+   IPO year (e.g. old BSE companies that only recently started trading on NSE)
+3. Skip stocks whose price data does not include the listing month, since their
+   first-month high cannot be known
+4. Record the **first listed month's HIGH** as `IPO_FIRST_MONTH_HIGH`
+5. **IF** `Current Price >= IPO_FIRST_MONTH_HIGH` **→ Stock Qualifies**
+   (Bot 2 uses the close of the selected reference month instead of the current price)
+6. Reply with each qualified stock's price, IPO first-month high and % above it, plus
+   how many stocks were skipped and why
 
 ---
 
@@ -120,7 +124,6 @@ The server starts at `http://localhost:8000`
 | `POST` | `/scan` | Trigger manual scan |
 | `GET` | `/scan/{scan_id}` | Check scan status |
 | `GET` | `/scans` | List recent scans |
-| `GET` | `/reports/{filename}` | Download Excel report |
 | `GET` | `/docs` | Interactive API docs |
 
 ### Manual Scan (without WhatsApp)
@@ -133,35 +136,7 @@ curl -X POST http://localhost:8000/scan \
 
 # Check status
 curl http://localhost:8000/scan/{scan_id}
-
-# Download report
-curl -O http://localhost:8000/reports/{filename}
 ```
-
----
-
-## 📊 Excel Report Structure
-
-### Sheet 1: Qualified Stocks
-| Column | Description |
-|--------|-------------|
-| Symbol | NSE trading symbol |
-| Company Name | Full company name |
-| IPO Year | Year of listing |
-| IPO First Month High | First month's HIGH price |
-| Breakout Month | Month when close exceeded IPO high |
-| Breakout Close | Close price at breakout |
-| Current Price | Latest available price |
-| % Above IPO High | Current gain over IPO high |
-| Listing Date | NSE listing date |
-
-### Sheet 2: All Stocks
-All scanned stocks with qualification status (green = qualified, red = not qualified)
-
-### Sheet 3: Summary
-- Total stocks scanned
-- Qualified count and percentage
-- Top 10 strongest stocks (with gold/silver/bronze highlighting)
 
 ---
 
@@ -244,20 +219,17 @@ st/
 │   ├── services/
 │   │   ├── nse_service.py      # NSE stock list fetcher
 │   │   ├── scanner_service.py  # Breakout screening engine
-│   │   ├── excel_service.py    # Excel report generator
-│   │   └── whatsapp_service.py # Twilio WhatsApp integration
-│   ├── utils/
-│   │   ├── cache.py            # Caching (file + DB)
-│   │   └── logger.py           # Structured logging
-│   └── static/
-│       └── reports/            # Generated Excel files
+│   │   └── telegram_service.py # Telegram messaging + result formatting
+│   └── utils/
+│       ├── cache.py            # Caching (file + DB)
+│       └── logger.py           # Structured logging
 ├── data/                       # Cached NSE data
 ├── db/                         # SQLite database
 ├── logs/                       # Application logs
 ├── tests/
 │   ├── test_scanner.py         # Scanner logic tests
-│   ├── test_webhook.py         # Webhook integration tests
-│   └── test_excel.py           # Excel generation tests
+│   ├── test_telegram.py        # Message formatting/sending tests
+│   └── test_webhook.py         # Webhook integration tests
 ├── .env.example                # Environment template
 ├── .gitignore
 ├── Dockerfile

@@ -19,6 +19,7 @@ os.environ.setdefault("TELEGRAM_BOT_TOKEN", "test_token")
 
 from app.main import app
 from app.database import init_db, drop_db
+from app.routers.webhook import _process_scan_and_notify
 
 
 @pytest.fixture(autouse=True)
@@ -95,6 +96,32 @@ class TestTelegramWebhook:
 
         mock_send_message.assert_called_once()
         assert "Year must be between 2000" in mock_send_message.call_args[0][1]
+
+
+class TestScanNotification:
+    """Test the background worker that delivers scan results."""
+
+    @patch("app.routers.webhook.telegram_service.send_message")
+    @patch("app.routers.webhook.scanner_service.run_scan")
+    def test_results_are_sent_as_a_text_message(self, mock_run_scan, mock_send_message):
+        mock_run_scan.return_value = {
+            "year": 2024, "total_listed": 1, "total_scanned": 1, "qualified_count": 1, "skipped": {},
+            "qualified_list": [
+                {"symbol": "ABC", "current_price": 110.0, "ipo_first_month_high": 100.0, "pct_above_ipo_high": 10.0}
+            ],
+        }
+
+        _process_scan_and_notify("scan-1", "111")
+
+        mock_send_message.assert_called_once()
+        assert "<b>ABC</b> ₹110.00 vs ₹100.00 (+10.00%)" in mock_send_message.call_args[0][1]
+
+    @patch("app.routers.webhook.telegram_service.send_message")
+    @patch("app.routers.webhook.scanner_service.run_scan", side_effect=RuntimeError("Yahoo <down>"))
+    def test_failed_scan_is_reported_to_the_user(self, mock_run_scan, mock_send_message):
+        _process_scan_and_notify("scan-1", "111")
+
+        assert "Scan failed: Yahoo &lt;down&gt;" in mock_send_message.call_args[0][1]
 
 
 class TestScanEndpoints:

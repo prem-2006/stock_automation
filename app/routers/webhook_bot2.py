@@ -9,6 +9,7 @@ Conversation flow:
   idle -> awaiting_year -> awaiting_month -> processing -> idle
 """
 
+import html
 import os
 import threading
 from datetime import datetime, UTC
@@ -20,7 +21,8 @@ from sqlalchemy.orm import Session
 
 from app.database import get_db, get_session_factory
 from app.models import Conversation
-from app.services.scanner_service import ScannerService
+from app.services.scanner_service import ScannerService, now_ist
+from app.services.telegram_service import format_scan_summary, send_telegram_message
 from app.config import get_settings
 from app.utils.logger import get_logger
 
@@ -58,48 +60,7 @@ def _bot2_url(method: str) -> str:
 
 
 def _send_message(chat_id: int, text: str, reply_markup: dict = None) -> bool:
-    payload = {"chat_id": chat_id, "text": text, "parse_mode": "HTML"}
-    if reply_markup:
-        payload["reply_markup"] = reply_markup
-    try:
-        max_len = 4000
-        chunks = []
-        if len(text) <= max_len:
-            chunks.append(text)
-        else:
-            current = ""
-            for line in text.split("\n"):
-                if len(current) + len(line) + 1 > max_len:
-                    if current:
-                        chunks.append(current)
-                    current = line + "\n"
-                else:
-                    current += line + "\n"
-            if current:
-                chunks.append(current)
-        with httpx.Client() as client:
-            for chunk in chunks:
-                payload["text"] = chunk
-                r = client.post(_bot2_url("sendMessage"), json=payload, timeout=10.0)
-                r.raise_for_status()
-        return True
-    except Exception as e:
-        logger.error(f"Bot2 send_message error: {e}")
-        return False
-
-
-def _send_document(chat_id: int, file_path: str, caption: str = "") -> bool:
-    try:
-        with open(file_path, "rb") as f:
-            files = {"document": (os.path.basename(file_path), f)}
-            data = {"chat_id": chat_id, "caption": caption, "parse_mode": "HTML"}
-            with httpx.Client() as client:
-                r = client.post(_bot2_url("sendDocument"), data=data, files=files, timeout=60.0)
-                r.raise_for_status()
-        return True
-    except Exception as e:
-        logger.error(f"Bot2 send_document error: {e}")
-        return False
+    return send_telegram_message(settings.TELEGRAM_BOT2_TOKEN, chat_id, text, reply_markup)
 
 
 def _month_keyboard() -> dict:
@@ -197,40 +158,12 @@ def _run_scan_and_notify(scan_id: str, chat_id: str, target_month: int, target_y
         logger.info(f"Bot2 scan start: job={scan_id} month={target_month}/{target_year}")
         summary = scanner_service.run_scan(scan_id, target_month=target_month, target_year_override=target_year)
 
-        year = summary.get("year", "?")
-        total = summary.get("total_scanned", 0)
-        q_count = summary.get("qualified_count", 0)
-        q_stocks = summary.get("qualified_list", [])
         month_name = MONTH_NAMES.get(target_month, str(target_month))
-
-        top_list = ""
-        for i, stock in enumerate(q_stocks, 1):
-            symbol = stock.get("symbol", "N/A")
-            pct = stock.get("pct_above_ipo_high", 0) or 0
-            top_list += f"{i}. <b>{symbol}</b> ({pct:+.1f}%)\n"
-
-        year_label = "ALL years" if year == 0 else str(year)
-        msg = (
-            f"\U0001f4ca <b>IPO Breakout Scan Complete</b>\n\n"
-            f"\U0001f4c5 Year: <b>{year_label}</b>\n"
-            f"\U0001f5d3 Reference Month: <b>{month_name} {target_year}</b>\n"
-            f"\U0001f50d Stocks Scanned: <b>{total}</b>\n"
-            f"\u2705 Qualified: <b>{q_count}</b>\n\n"
-        )
-        if top_list:
-            msg += f"\U0001f3c6 <b>Qualified Stocks:</b>\n{top_list}\n"
-        msg += "\U0001f4ce Excel report attached below."
-
-        report_path = summary.get("report_path")
-        if report_path and os.path.exists(report_path):
-            _send_message(int(chat_id), msg)
-            _send_document(int(chat_id), report_path, "Your detailed Excel report")
-        else:
-            _send_message(int(chat_id), msg)
+        _send_message(int(chat_id), format_scan_summary(summary, reference_month=f"{month_name} {target_year}"))
 
     except Exception as e:
         logger.error(f"Bot2 scan error: {e}", exc_info=True)
-        _send_message(int(chat_id), f"\u274c Scan failed: {e}")
+        _send_message(int(chat_id), f"\u274c Scan failed: {html.escape(str(e))}")
     finally:
         _update_conv_state(chat_id, "idle")
 
@@ -288,7 +221,7 @@ async def telegram2_webhook(
                     return JSONResponse({"status": "ok"})
 
                 month_name = MONTH_NAMES[month_num]
-                today = datetime.now()
+                today = now_ist()
                 target_year = today.year - 1 if month_num >= today.month else today.year
 
                 conv = _get_or_create_conv(db, chat_id)
@@ -413,7 +346,7 @@ async def telegram2_webhook(
                 return JSONResponse({"status": "ok"})
 
             month_name = MONTH_NAMES[month_num]
-            today = datetime.now()
+            today = now_ist()
             target_year = today.year - 1 if month_num >= today.month else today.year
 
             try:
@@ -455,7 +388,7 @@ async def telegram2_webhook(
 
         # Processing
         if conv.current_state == "processing":
-            _send_message(int(chat_id), "\u23f3 Scan still running... you'll get the report shortly!")
+            _send_message(int(chat_id), "\u23f3 Scan still running... you'll get the results shortly!")
             return JSONResponse({"status": "ok"})
 
         # Default

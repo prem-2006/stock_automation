@@ -3,7 +3,6 @@ FastAPI Application Entry Point.
 
 Configures the application with:
 - CORS middleware
-- Static file serving for reports
 - Router registration
 - Startup/shutdown lifecycle events
 
@@ -16,7 +15,6 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.staticfiles import StaticFiles
 
 from app.config import get_settings
 from app.database import init_db
@@ -44,12 +42,10 @@ async def lifespan(app: FastAPI):
     if IS_VERCEL:
         os.makedirs("/tmp/db", exist_ok=True)
         os.makedirs("/tmp/data", exist_ok=True)
-        os.makedirs("/tmp/reports", exist_ok=True)
     else:
         os.makedirs("db", exist_ok=True)
         os.makedirs("data", exist_ok=True)
         os.makedirs("logs", exist_ok=True)
-        os.makedirs(os.path.join("app", "static", "reports"), exist_ok=True)
 
     # Initialize database
     init_db()
@@ -71,9 +67,9 @@ def create_app() -> FastAPI:
     app = FastAPI(
         title="IPO Breakout Stock Screener",
         description=(
-            "WhatsApp-integrated stock screening bot that identifies NSE stocks "
-            "breaking above their IPO first-month high. Supports automated scanning, "
-            "Excel report generation, and WhatsApp delivery via Twilio."
+            "Stock screening bot that identifies NSE stocks breaking above their "
+            "IPO first-month high. Supports automated scanning and Telegram "
+            "delivery of the results."
         ),
         version="1.0.0",
         docs_url="/docs",
@@ -89,12 +85,6 @@ def create_app() -> FastAPI:
         allow_methods=["*"],
         allow_headers=["*"],
     )
-
-    # --- Static Files (for serving Excel reports) ---
-    if not IS_VERCEL:
-        reports_dir = os.path.join("app", "static", "reports")
-        os.makedirs(reports_dir, exist_ok=True)
-        app.mount("/static", StaticFiles(directory="app/static"), name="static")
 
     # --- Register Routers ---
     app.include_router(webhook.router)
@@ -113,7 +103,6 @@ def create_app() -> FastAPI:
                 "webhook": "POST /webhook/whatsapp",
                 "scan": "POST /scan",
                 "status": "GET /scan/{scan_id}",
-                "reports": "GET /reports/{filename}",
                 "health": "GET /health",
                 "scans_list": "GET /scans",
             },

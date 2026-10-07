@@ -13,11 +13,10 @@ services:
     env_file:
       - .env
     volumes:
-      # Persist database and reports
+      # Persist database, data cache and logs
       - ./db:/app/db
       - ./data:/app/data
       - ./logs:/app/logs
-      - ./app/static/reports:/app/app/static/reports
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "python", "-c", "import requests; requests.get('http://localhost:8000/health')"]
