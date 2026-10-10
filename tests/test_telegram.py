@@ -41,7 +41,8 @@ class TestFormatScanSummary:
         msg = format_scan_summary(SUMMARY)
 
         assert "Breakout Month: <b>October 2026</b> (live price)" in msg
-        assert "Rule: September 2026 close below the IPO first-month high, current price at or above it" in msg
+        assert ("Rule: every monthly close from listing to September 2026 below the IPO first-month high, "
+                "current price at or above it (first breakout)") in msg
 
     def test_lists_all_three_prices_for_each_qualified_stock(self):
         msg = format_scan_summary(SUMMARY)
@@ -65,7 +66,8 @@ class TestFormatScanSummary:
 
         assert "IPO Year: <b>ALL</b>" in msg
         assert "Breakout Month: <b>August 2026</b>\n" in msg
-        assert "Rule: July 2026 close below the IPO first-month high, August 2026 close at or above it" in msg
+        assert ("Rule: every monthly close from listing to July 2026 below the IPO first-month high, "
+                "August 2026 close at or above it (first breakout)") in msg
         assert "| Jul close ₹700.00 | Aug close ₹750.00 (+3.16%)" in msg
         assert "• 4 listed in August 2026 or later, so there is no July 2026 close to compare" in msg
 

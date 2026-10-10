@@ -242,6 +242,26 @@ class TestScanSingleStock:
         assert r["qualified"] is False
         assert r["current_price"] is None  # live price not even fetched
 
+    def test_earlier_breakout_disqualifies_even_after_dipping_back(self, scanner, monkeypatch):
+        # June closed above the IPO high, then it fell back below by September
+        highs = [100.0, 95.0, 95.0, 104.0, 99.0, 99.0, 99.0, 106.0]
+        closes = [90.0, 80.0, 85.0, 102.0, 92.0, 95.0, 96.0, 97.0]
+        nse = _candles("2026-03-01", highs, closes)
+        r = _scan(scanner, monkeypatch, nse, listing="2026-03-12", year=2026, months=LIVE_OCT, live_price=104.0)
+
+        assert r["skip_reason"] is None
+        assert r["previous_month_close"] == 96.0
+        assert r["qualified"] is False
+
+    def test_wicks_above_ipo_high_do_not_count_as_a_past_breakout(self, scanner, monkeypatch):
+        # Earlier months traded above the IPO high intraday but always closed below it
+        highs = [100.0, 103.0, 95.0, 105.0, 99.0, 101.0, 102.0, 106.0]
+        closes = [90.0, 80.0, 85.0, 88.0, 92.0, 95.0, 96.0, 97.0]
+        nse = _candles("2026-03-01", highs, closes)
+        r = _scan(scanner, monkeypatch, nse, listing="2026-03-12", year=2026, months=LIVE_OCT, live_price=104.0)
+
+        assert r["qualified"] is True
+
     def test_still_below_ipo_high_is_not_qualified(self, scanner, monkeypatch):
         nse = _listed_march_2026(sep_close=95.0)
         r = _scan(scanner, monkeypatch, nse, listing="2026-03-12", year=2026, months=LIVE_OCT, live_price=99.99)

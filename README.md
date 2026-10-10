@@ -19,7 +19,7 @@ WhatsApp Message (Twilio)
   yfinance API (Monthly OHLC Data)
         ↓
   Breakout Condition Check
-  (Last Month's Close < IPO First Month High <= Current Price)
+  (Every Monthly Close Until Last Month < IPO First Month High <= Current Price)
         ↓
   Chat Reply with Qualified Stocks
 ```
@@ -35,12 +35,13 @@ For each stock listed on NSE in the entered IPO year:
 3. Skip stocks whose price data does not include the listing month, since their
    first-month high cannot be known
 4. Record the **first listed month's HIGH** as `IPO_FIRST_MONTH_HIGH`
-5. **Stock Qualifies** (fresh breakout) only when both hold at the same time:
-   - the previous month's close `< IPO_FIRST_MONTH_HIGH` (e.g. September's close while October is running)
+5. **Stock Qualifies** (first-ever breakout) only when both hold at the same time:
+   - every monthly close from the IPO month through the previous month `< IPO_FIRST_MONTH_HIGH`
+     (e.g. up to September while October is running); intraday wicks above it do not count
    - the current live price `>= IPO_FIRST_MONTH_HIGH`
 
    Bot 2 applies the same two checks to the month you select: that month's close must be at or
-   above the IPO high and the month before it must have closed below.
+   above the IPO high and every month before it must have closed below.
 6. Reply with each qualified stock's price, IPO first-month high and % above it, plus
    how many stocks were skipped and why
 

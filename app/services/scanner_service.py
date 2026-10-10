@@ -4,8 +4,8 @@ IPO Breakout Scanner Service.
 Core screening engine that:
 1. Fetches monthly OHLC data for each stock using yfinance
 2. Identifies the first listed month's HIGH
-3. Finds fresh breakouts: the previous month closed below that IPO HIGH and
-   the current month (live price) is at or above it
+3. Finds first-ever breakouts: every month up to the previous one closed below
+   that IPO HIGH and the current month (live price) is at or above it
 4. Generates results with parallel processing
 
 All prices are actual traded prices (adjusted for splits/bonuses, NOT for
@@ -311,8 +311,9 @@ class ScannerService:
 
     def _scan_single_stock(self, stock: Dict, year: int, months: BreakoutMonths) -> Dict:
         """
-        Scan a single stock for a fresh IPO breakout:
-          1. the previous month closed below the IPO first-month high, and
+        Scan a single stock for a first-ever IPO breakout:
+          1. every month from the IPO month through the previous month closed
+             below the IPO first-month high, and
           2. the breakout month (live price while it runs) is at or above it.
         Fully protected against bad data from yfinance.
 
@@ -435,8 +436,12 @@ class ScannerService:
                 return result
 
             result["previous_month_close"] = prev_close
-            if prev_close >= first_month_high:
-                return result  # Already at/above its IPO high last month: not a fresh breakout
+
+            # ...and so did every month since listing: this has to be the first breakout ever.
+            # Closes count, not intraday highs, so wicks above the IPO high do not disqualify.
+            past_closes = [safe_round(c) for ym, c in closes.items() if ym <= prev_month]
+            if max(past_closes) >= first_month_high:
+                return result  # Closed at/above its IPO high before: not a first breakout
 
             # Condition 2: the breakout month is at or above the IPO first-month high
             current_price = None

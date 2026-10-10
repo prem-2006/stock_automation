@@ -115,8 +115,8 @@ def format_scan_summary(summary: dict) -> str:
         "",
         f"📅 IPO Year: <b>{'ALL' if year == 0 else year}</b>",
         f"🗓 Breakout Month: <b>{_month(breakout)}</b>" + (" (live price)" if live else ""),
-        f"📏 Rule: {_month(previous)} close below the IPO first-month high, "
-        f"{'current price' if live else _month(breakout) + ' close'} at or above it",
+        f"📏 Rule: every monthly close from listing to {_month(previous)} below the IPO first-month high, "
+        f"{'current price' if live else _month(breakout) + ' close'} at or above it (first breakout)",
         f"🔍 IPOs checked: <b>{summary.get('total_scanned', 0)}</b>"
         f" (of {summary.get('total_listed', 0)} NSE listings)",
         f"✅ Qualified: <b>{summary.get('qualified_count', 0)}</b>",
