@@ -118,7 +118,7 @@ def format_scan_summary(summary: dict) -> str:
         f"📏 Rule: every monthly close from listing to {_month(previous)} below the IPO first-month high, "
         f"{'current price' if live else _month(breakout) + ' close'} at or above it (first breakout)",
         f"🔍 IPOs checked: <b>{summary.get('total_scanned', 0)}</b>"
-        f" (of {summary.get('total_listed', 0)} NSE listings)",
+        f" (of {summary.get('total_listed', 0)} listed on NSE/BSE)",
         f"✅ Qualified: <b>{summary.get('qualified_count', 0)}</b>",
     ]
 
@@ -144,7 +144,7 @@ def format_scan_summary(summary: dict) -> str:
                 f"listed in {_month(breakout)}{'' if live else ' or later'}, "
                 f"so there is no {_month(previous)} close to compare"
             ),
-            SKIP_NO_DATA: "have no price data on Yahoo Finance",
+            SKIP_NO_DATA: "have no price data on Yahoo Finance (NSE SME stocks are not covered)",
         }
         lines += ["", "ℹ️ <b>Not checked:</b>"]
         for reason, label in labels.items():

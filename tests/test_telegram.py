@@ -53,7 +53,7 @@ class TestFormatScanSummary:
     def test_reports_checked_count_and_skip_reasons(self):
         msg = format_scan_summary({**SUMMARY, "skipped": {**SUMMARY["skipped"], SKIP_TOO_RECENT: 3}})
 
-        assert "IPOs checked: <b>97</b> (of 382 NSE listings)" in msg
+        assert "IPOs checked: <b>97</b> (of 382 listed on NSE/BSE)" in msg
         assert "• 276 were already trading before their IPO year" in msg
         assert "• 1 have no price data for their listing month: HAL" in msg
         assert "• 3 listed in October 2026, so there is no September 2026 close to compare" in msg

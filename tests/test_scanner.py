@@ -21,6 +21,7 @@ os.environ.setdefault("DATABASE_URL", "sqlite:///./test_db.db")
 from app.services.scanner_service import (
     IST,
     ScannerService,
+    SKIP_NO_DATA,
     SKIP_NO_LISTING_MONTH,
     SKIP_OLDER_LISTING,
     SKIP_TOO_RECENT,
@@ -198,7 +199,8 @@ def _scan(scanner, monkeypatch, nse, bse=None, listing="2024-10-22", year=2024,
     ticker = MagicMock()
     ticker.fast_info.get.return_value = live_price
     monkeypatch.setattr("app.services.scanner_service.yf.Ticker", lambda sym: ticker)
-    stock = {"symbol": "ABC", "company_name": "ABC Ltd", "listing_date": listing}
+    stock = {"symbol": "ABC", "company_name": "ABC Ltd", "listing_date": listing,
+             "yf_symbol": "ABC.NS", "bse_symbol": "ABC", "segment": "NSE"}
     return scanner._scan_single_stock(stock, year, months)
 
 
@@ -323,6 +325,50 @@ class TestScanSingleStock:
         bse = _candles("2003-01-01", [5.0] * 3, [4.0] * 3)
         r = _scan(scanner, monkeypatch, nse, bse, listing="2016-05-10", year=0, months=((2016, 7), (2016, 6), False))
 
+        assert r["skip_reason"] == SKIP_OLDER_LISTING
+
+    def test_bse_only_ipo_is_read_from_bse(self, scanner, monkeypatch):
+        bse = _candles("2025-03-01", [100.0, 95.0, 103.0], [90.0, 92.0, 101.0])
+        frames = {"BSEONLY.BO": bse}
+        requested = []
+        monkeypatch.setattr(
+            scanner, "_fetch_monthly_data",
+            lambda sym, retry_on_empty=True: requested.append(sym) or frames.get(sym),
+        )
+        stock = {"symbol": "BSEONLY", "company_name": "BSE Only Ltd", "listing_date": pd.Timestamp("2025-03-01"),
+                 "yf_symbol": "BSEONLY.BO", "bse_symbol": None, "segment": "BSE"}
+
+        r = scanner._scan_single_stock(stock, 2025, ((2025, 5), (2025, 4), False))
+
+        assert requested == ["BSEONLY.BO"]  # no second, pre-IPO history request
+        assert r["qualified"] is True
+        assert r["ipo_first_month_high"] == 100.0
+
+    def test_stock_yahoo_has_no_prices_for_is_not_requested(self, scanner, monkeypatch):
+        monkeypatch.setattr(scanner, "_fetch_monthly_data", lambda *a, **k: pytest.fail("should not fetch"))
+        stock = {"symbol": "SMECO", "listing_date": pd.Timestamp("2025-03-01"), "yf_symbol": "SMECO.NS",
+                 "bse_symbol": None, "segment": "NSE SME", "unavailable": True}
+
+        r = scanner._scan_single_stock(stock, 2025, LIVE_OCT)
+
+        assert r["skip_reason"] == SKIP_NO_DATA
+        assert r["qualified"] is False
+
+    def test_bse_history_is_looked_up_by_the_bse_id_not_the_nse_symbol(self, scanner, monkeypatch):
+        nse = _candles("2026-08-01", [500.0, 520.0], [480.0, 510.0])
+        requested = []
+
+        def fetch(sym, retry_on_empty=True):
+            requested.append(sym)
+            return {"ABC.NS": nse, "BSEID.BO": _candles("2004-01-01", [5.0] * 3, [4.0] * 3)}.get(sym)
+
+        monkeypatch.setattr(scanner, "_fetch_monthly_data", fetch)
+        stock = {"symbol": "ABC", "listing_date": "2026-04-20", "yf_symbol": "ABC.NS",
+                 "bse_symbol": "BSEID", "segment": "NSE"}
+
+        r = scanner._scan_single_stock(stock, 2026, LIVE_OCT)
+
+        assert "BSEID.BO" in requested and "ABC.BO" not in requested
         assert r["skip_reason"] == SKIP_OLDER_LISTING
 
     def test_selected_breakout_month_uses_its_close(self, scanner, monkeypatch):

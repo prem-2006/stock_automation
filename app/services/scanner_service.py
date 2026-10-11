@@ -32,7 +32,7 @@ import yfinance as yf
 from app.config import get_settings
 from app.database import get_session_factory
 from app.models import ScanJob, ScanResult
-from app.services.nse_service import NSEService
+from app.services.listing_service import ListingService
 from app.utils.logger import get_logger
 
 logger = get_logger("scanner")
@@ -97,7 +97,7 @@ class ScannerService:
 
     def __init__(self):
         self.settings = get_settings()
-        self.nse_service = NSEService()
+        self.listing_service = ListingService()
 
     def create_scan_job(self, year: int, phone_number: Optional[str] = None) -> str:
         """
@@ -164,7 +164,7 @@ class ScannerService:
 
             # Step 1: Get stocks for the given IPO year
             try:
-                stocks = self.nse_service.get_stocks_by_ipo_year(year)
+                stocks = self.listing_service.get_stocks_by_ipo_year(year)
             except Exception as e:
                 logger.error(f"Failed to fetch stock list for year {year}: {e}")
                 stocks = []
@@ -327,7 +327,8 @@ class ScannerService:
         """
         breakout_month, prev_month, live = months
         symbol = stock.get("symbol", "UNKNOWN")
-        yf_symbol = f"{symbol}.NS"
+        yf_symbol = stock.get("yf_symbol") or f"{symbol}.NS"
+        segment = stock.get("segment", "NSE")
 
         result = {
             "symbol": symbol,
@@ -343,6 +344,12 @@ class ScannerService:
             "pct_above_ipo_high": None,
             "skip_reason": None,
         }
+
+        # Yahoo is known to have no prices for this company (e.g. NSE SME): nothing to request
+        if stock.get("unavailable"):
+            result["error"] = "No price data available"
+            result["skip_reason"] = SKIP_NO_DATA
+            return result
 
         # Rate limiting with jitter to avoid Yahoo Finance rate limiting
         delay = self.settings.API_CALL_DELAY + random.uniform(0.2, 1.0)
@@ -376,7 +383,7 @@ class ScannerService:
                 result["skip_reason"] = SKIP_NO_DATA
                 return result
 
-            # The year the stock must have IPO'd in: its NSE listing year
+            # The year the stock must have IPO'd in: its listing year
             # (an ALL scan holds every stock to its own listing year).
             listing = self._to_timestamp(stock.get("listing_date"))
             ipo_year = listing.year if listing is not None else (year or None)
@@ -384,8 +391,10 @@ class ScannerService:
             # Strict IPO year check: reject stocks that traded before their IPO year.
             # BSE history counts too, because old BSE companies show up in the NSE
             # list with a recent "listing date" once they start trading on NSE.
-            if ipo_year is None or monthly_data.index[0].year >= ipo_year:
-                bse_earlier = self._fetch_bse_months_before(symbol, monthly_data.index[0])
+            # (BSE-only stocks are already read from BSE; others use their BSE id from the ISIN.)
+            bse_symbol = stock.get("bse_symbol")
+            if segment != "BSE" and bse_symbol and (ipo_year is None or monthly_data.index[0].year >= ipo_year):
+                bse_earlier = self._fetch_bse_months_before(bse_symbol, monthly_data.index[0])
                 if bse_earlier is not None:
                     monthly_data = pd.concat([bse_earlier, monthly_data])
 

@@ -26,7 +26,19 @@ WhatsApp Message (Twilio)
 
 ## 📋 Screening Logic
 
-For each stock listed on NSE in the entered IPO year:
+**Which companies are checked.** Every company that listed in the entered year across:
+
+| Source | Listing date from | Prices from |
+|--------|-------------------|-------------|
+| NSE main board (`EQUITY_L.csv`) | NSE | Yahoo `.NS` |
+| BSE-only companies, mostly BSE SME (BSE equity list, ISIN not on NSE) | first month of Yahoo price history | Yahoo `.BO` |
+| NSE SME / Emerge (`SME_EQUITY_L.csv`) | NSE | not available on Yahoo — counted, but reported as "no price data" |
+
+BSE-only companies are covered for scrip codes ≥ 540000 (IPOs since about 2016); a bundled
+snapshot (`data/bse_listings.csv`) is topped up live with newly listed scrips. A company that
+is on both exchanges is counted once.
+
+For each of those companies:
 
 1. Fetch monthly OHLC data with **actual traded prices** (split/bonus-adjusted, not
    dividend-adjusted), so every number matches NSE / TradingView charts
@@ -222,7 +234,8 @@ st/
 │   │   ├── webhook.py          # WhatsApp webhook handler
 │   │   └── scan.py             # REST scan API
 │   ├── services/
-│   │   ├── nse_service.py      # NSE stock list fetcher
+│   │   ├── nse_service.py      # NSE main-board + SME list fetcher
+│   │   ├── listing_service.py  # Full listing universe (NSE + NSE SME + BSE)
 │   │   ├── scanner_service.py  # Breakout screening engine
 │   │   └── telegram_service.py # Telegram messaging + result formatting
 │   └── utils/
@@ -232,6 +245,7 @@ st/
 ├── db/                         # SQLite database
 ├── logs/                       # Application logs
 ├── tests/
+│   ├── test_listing.py         # Listing universe tests
 │   ├── test_scanner.py         # Scanner logic tests
 │   ├── test_telegram.py        # Message formatting/sending tests
 │   └── test_webhook.py         # Webhook integration tests

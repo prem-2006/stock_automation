@@ -23,6 +23,8 @@ logger = get_logger("nse_service")
 # NSE equity list URL (official source)
 NSE_EQUITY_URL = "https://nseindia.com/api/equity-stockIndices?index=SECURITIES%20IN%20F%26O"
 NSE_EQUITY_CSV_URL = "https://archives.nseindia.com/content/equities/EQUITY_L.csv"
+# NSE Emerge (SME platform) listings, which are not part of EQUITY_L.csv
+NSE_SME_CSV_URL = "https://nsearchives.nseindia.com/emerge/corporates/content/SME_EQUITY_L.csv"
 
 # Browser-like headers required by NSE
 NSE_HEADERS = {
@@ -174,12 +176,83 @@ class NSEService:
                 "symbol": str(row.get(symbol_col, "")).strip(),
                 "company_name": str(row.get(name_col, "")).strip(),
                 "listing_date": row.get("DATE OF LISTING"),
+                "isin": str(row.get("ISIN NUMBER", "")).strip(),
+                "segment": "NSE",
             }
 
             if stock["symbol"]:
                 stocks.append(stock)
 
         logger.info(f"Found {len(stocks)} stocks for IPO year {year}")
+        return stocks
+
+    def fetch_sme_list(self) -> pd.DataFrame:
+        """
+        Fetch the NSE Emerge (SME) listings, in the same column layout as the main-board list
+        (SYMBOL, NAME OF COMPANY, DATE OF LISTING, ISIN NUMBER, IPO_YEAR, ...).
+        """
+        cached_data = self.cache.get("nse_sme_list")
+        if cached_data is not None:
+            return pd.read_csv(io.StringIO(cached_data))
+
+        for attempt in range(1, self.max_retries + 1):
+            try:
+                response = self._get_session().get(NSE_SME_CSV_URL, timeout=30)
+                response.raise_for_status()
+
+                df = pd.read_csv(io.StringIO(response.text))
+                df.columns = df.columns.str.strip()
+                df = df.rename(columns={
+                    "NAME_OF_COMPANY": "NAME OF COMPANY",
+                    "DATE_OF_LISTING": "DATE OF LISTING",
+                    "PAID_UP_VALUE": "PAID UP VALUE",
+                    "ISIN_NUMBER": "ISIN NUMBER",
+                    "FACE_VALUE": "FACE VALUE",
+                })
+                df = df[[c for c in df.columns if not c.startswith("Unnamed")]]
+                df["DATE OF LISTING"] = pd.to_datetime(
+                    df["DATE OF LISTING"], format="%d-%b-%y", errors="coerce"
+                )
+                df["IPO_YEAR"] = df["DATE OF LISTING"].dt.year
+
+                logger.info(f"Fetched {len(df)} SME stocks from NSE")
+                self.cache.set("nse_sme_list", df.to_csv(index=False))
+                return df
+            except Exception as e:
+                logger.warning(f"NSE SME CSV fetch attempt {attempt} failed: {e}")
+                if attempt < self.max_retries:
+                    time.sleep(2 ** attempt)
+
+        local_path = os.path.join("data", "nse_sme_master.csv")
+        if os.path.exists(local_path):
+            logger.info("Using local NSE SME master file")
+            return pd.read_csv(local_path)
+
+        logger.error("Failed to fetch NSE SME list from all sources")
+        return pd.DataFrame()
+
+    def get_sme_stocks_by_ipo_year(self, year: int) -> List[Dict]:
+        """NSE SME stocks listed in `year` (all of them for year 0)."""
+        df = self.fetch_sme_list()
+        if df.empty:
+            return []
+
+        df["DATE OF LISTING"] = pd.to_datetime(df["DATE OF LISTING"], errors="coerce")
+        filtered = df if year == 0 else df[df["DATE OF LISTING"].dt.year == year]
+
+        stocks = []
+        for _, row in filtered.iterrows():
+            symbol = str(row.get("SYMBOL", "")).strip()
+            if symbol:
+                stocks.append({
+                    "symbol": symbol,
+                    "company_name": str(row.get("NAME OF COMPANY", "")).strip(),
+                    "listing_date": row.get("DATE OF LISTING"),
+                    "isin": str(row.get("ISIN NUMBER", "")).strip(),
+                    "segment": "NSE SME",
+                })
+
+        logger.info(f"Found {len(stocks)} NSE SME stocks for IPO year {year}")
         return stocks
 
     def get_all_ipo_years(self) -> List[int]:
