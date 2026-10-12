@@ -18,6 +18,8 @@ import json
 import os
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from typing import Dict, List, Optional, Set
 
 import pandas as pd
@@ -25,7 +27,12 @@ import requests
 import yfinance as yf
 
 from app.config import get_settings
-from app.services.nse_service import NSEService
+from app.services.nse_service import (
+    LIVE_FETCH_TIMEOUT,
+    NSEService,
+    live_source_blocked,
+    mark_live_source_failed,
+)
 from app.utils.cache import FileCache
 from app.utils.logger import get_logger
 
@@ -54,6 +61,24 @@ CONTROL_TICKER = "RELIANCE.NS"
 _DOWNLOAD_LOCK = threading.Lock()
 _UNIVERSE_LOCK = threading.Lock()
 
+# Seconds a single Yahoo request may take, and how long to wait for another bot's turn
+DOWNLOAD_TIMEOUT = 20
+LOCK_WAIT_SECONDS = 120
+
+
+@contextmanager
+def _turn(lock: threading.Lock, wait: float = LOCK_WAIT_SECONDS):
+    """
+    Take the lock for politeness between bots, but never wait forever: if the
+    other bot is stuck, carry on without it rather than hanging this scan too.
+    """
+    acquired = lock.acquire(timeout=wait)
+    try:
+        yield
+    finally:
+        if acquired:
+            lock.release()
+
 
 def _load_json(raw: Optional[str]) -> dict:
     """Parse a cached JSON object; an unreadable cache entry counts as empty."""
@@ -75,25 +100,33 @@ def download_monthly_history(tickers: List[str]) -> Dict[str, Optional[pd.DataFr
     unique = list(dict.fromkeys(tickers))
     frames: Dict[str, Optional[pd.DataFrame]] = {}
 
-    with _DOWNLOAD_LOCK:
+    with _turn(_DOWNLOAD_LOCK):
         for i in range(0, len(unique), CHUNK_SIZE):
             part = unique[i:i + CHUNK_SIZE]
-            try:
-                data = yf.download(
-                    part + [CONTROL_TICKER], period="max", interval="1mo",
-                    auto_adjust=False, group_by="ticker", threads=True, progress=False,
-                )
-            except Exception as e:
-                logger.warning(f"Bulk Yahoo request failed for {len(part)} tickers: {e}")
-                continue
-
             chunk: Dict[str, Optional[pd.DataFrame]] = {}
-            for ticker in part + [CONTROL_TICKER]:
+            for attempt in (1, 2):  # one quick retry: a throttled chunk often succeeds a moment later
                 try:
-                    frame = data[ticker].dropna(subset=["High", "Close"])
-                    chunk[ticker] = frame if len(frame) else None
-                except Exception:
-                    chunk[ticker] = None
+                    data = yf.download(
+                        part + [CONTROL_TICKER], period="max", interval="1mo",
+                        auto_adjust=False, group_by="ticker", threads=True, progress=False,
+                        timeout=DOWNLOAD_TIMEOUT,
+                    )
+                except Exception as e:
+                    logger.warning(f"Bulk Yahoo request failed for {len(part)} tickers: {e}")
+                    data = None
+
+                chunk = {}
+                for ticker in part + [CONTROL_TICKER]:
+                    try:
+                        frame = data[ticker].dropna(subset=["High", "Close"])
+                        chunk[ticker] = frame if len(frame) else None
+                    except Exception:
+                        chunk[ticker] = None
+
+                if chunk[CONTROL_TICKER] is not None:
+                    break
+                if attempt == 1:
+                    time.sleep(3)
 
             if chunk[CONTROL_TICKER] is None:
                 logger.warning(f"Yahoo did not answer a chunk of {len(part)} tickers; skipping it")
@@ -124,7 +157,7 @@ class ListingService:
 
     def get_stocks_by_ipo_year(self, year: int) -> List[Dict]:
         """Thread-safe wrapper: two bots asking at once build the universe one after the other."""
-        with _UNIVERSE_LOCK:
+        with _turn(_UNIVERSE_LOCK, wait=300):
             return self._build_universe(year)
 
     def _build_universe(self, year: int) -> List[Dict]:
@@ -136,10 +169,12 @@ class ListingService:
         pre-IPO history check, or None) and unavailable (True when Yahoo has
         no prices for it).
         """
-        main = self.nse_service.get_stocks_by_ipo_year(year)
-        sme = self.nse_service.get_sme_stocks_by_ipo_year(year)
-
-        bse_list = self._fetch_bse_list()
+        # The BSE list is independent of the NSE lists, so fetch it while they load
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            bse_future = pool.submit(self._fetch_bse_list)
+            main = self.nse_service.get_stocks_by_ipo_year(year)
+            sme = self.nse_service.get_sme_stocks_by_ipo_year(year)
+            bse_list = bse_future.result()
         bse_id_by_isin = dict(zip(bse_list["ISIN_NUMBER"], bse_list["scrip_id"])) if not bse_list.empty else {}
 
         stocks: List[Dict] = []
@@ -224,16 +259,18 @@ class ListingService:
             except ValueError:
                 pass
 
-        try:
-            response = requests.get(BSE_LIST_URL, headers=BSE_HEADERS, timeout=60)
-            response.raise_for_status()
-            rows = response.json()
-            if rows:
-                self.cache.set("bse_equity_list", json.dumps(rows))
-                logger.info(f"Fetched {len(rows)} BSE equity scrips")
-                return pd.DataFrame(rows)
-        except Exception as e:
-            logger.warning(f"BSE equity list fetch failed: {e}")
+        if not live_source_blocked("bse_list"):
+            try:
+                response = requests.get(BSE_LIST_URL, headers=BSE_HEADERS, timeout=LIVE_FETCH_TIMEOUT * 2)
+                response.raise_for_status()
+                rows = response.json()
+                if rows:
+                    self.cache.set("bse_equity_list", json.dumps(rows))
+                    logger.info(f"Fetched {len(rows)} BSE equity scrips")
+                    return pd.DataFrame(rows)
+            except Exception as e:
+                logger.warning(f"BSE equity list fetch failed ({e}); using bundled snapshot")
+                mark_live_source_failed("bse_list")
 
         return pd.DataFrame()
 

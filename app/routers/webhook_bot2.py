@@ -33,6 +33,8 @@ settings = get_settings()
 scanner_service = ScannerService()
 IS_VERCEL = os.environ.get("VERCEL", "") == "1" or os.environ.get("VERCEL_ENV") is not None
 BOT2_PREFIX = "bot2_"
+# Seconds before a long scan sends a "still working" note
+STILL_WORKING_AFTER_SECONDS = 90
 
 MONTH_NAMES = {
     1: "January", 2: "February", 3: "March", 4: "April",
@@ -155,6 +157,13 @@ def _update_conv_state(chat_id: str, state: str) -> None:
 # ---------------------------------------------------------------------------
 
 def _run_scan_and_notify(scan_id: str, chat_id: str, target_month: int, target_year: int) -> None:
+    still_working = threading.Timer(
+        STILL_WORKING_AFTER_SECONDS,
+        lambda: _send_message(int(chat_id), "⏳ Still scanning, results are coming shortly..."),
+    )
+    still_working.daemon = True
+    still_working.start()
+
     try:
         logger.info(f"Bot2 scan start: job={scan_id} month={target_month}/{target_year}")
         summary = scanner_service.run_scan(scan_id, target_month=target_month, target_year_override=target_year)
@@ -164,6 +173,7 @@ def _run_scan_and_notify(scan_id: str, chat_id: str, target_month: int, target_y
         logger.error(f"Bot2 scan error: {e}", exc_info=True)
         _send_message(int(chat_id), f"\u274c Scan failed: {html.escape(str(e))}")
     finally:
+        still_working.cancel()
         _update_conv_state(chat_id, "idle")
 
 

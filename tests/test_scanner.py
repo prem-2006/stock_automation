@@ -416,6 +416,41 @@ class TestScanSingleStock:
         assert breakout_months(1, 2027) == ((2027, 1), (2026, 12), False)
 
 
+class TestStalledRequests:
+    """A request that never returns must not hang a scan."""
+
+    def test_stalled_stock_is_skipped_and_the_scan_finishes(self, scanner, monkeypatch):
+        import threading
+        import time
+
+        release = threading.Event()
+
+        def scan(stock, year, months, prefetched=None, deadline=None):
+            if stock["symbol"] == "STUCK":
+                release.wait(30)  # never answers within the budget
+            return {"symbol": stock["symbol"], "qualified": stock["symbol"] == "FAST", "skip_reason": None}
+
+        monkeypatch.setattr("app.services.scanner_service.SCAN_BUDGET_SECONDS", 1)
+        monkeypatch.setattr(scanner, "_prefetch_histories", lambda stocks: {"FAST.NS": None})
+        monkeypatch.setattr(scanner, "_scan_single_stock", scan)
+        stocks = [{"symbol": "FAST"}, {"symbol": "STUCK"}]
+
+        started = time.time()
+        results = {r["symbol"]: r for r in scanner._scan_stocks_parallel(stocks, 2026, LIVE_OCT)}
+        release.set()
+
+        assert time.time() - started < 10
+        assert results["FAST"]["qualified"] is True
+        assert results["STUCK"]["skip_reason"] == SKIP_NO_DATA
+        assert results["STUCK"]["error"] == "Timed out"
+
+    def test_yahoo_answering_nothing_fails_fast_with_a_message(self, scanner, monkeypatch):
+        monkeypatch.setattr(scanner, "_prefetch_histories", lambda stocks: {})
+
+        with pytest.raises(RuntimeError, match="Yahoo Finance is not returning price data"):
+            scanner._scan_stocks_parallel([{"symbol": "ABC"}], 2026, LIVE_OCT)
+
+
 class TestBuildSummary:
     """Test the counts reported to the user."""
 

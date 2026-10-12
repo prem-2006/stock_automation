@@ -36,6 +36,23 @@ NSE_HEADERS = {
 }
 
 
+# A live source (NSE, BSE) that failed is not retried for this long: the bundled
+# files are used instead, so a blocked network costs one short timeout, not one per scan.
+LIVE_FETCH_TIMEOUT = 10
+RETRY_LIVE_AFTER_SECONDS = 1800
+_FAILED_AT: Dict[str, float] = {}
+
+
+def live_source_blocked(name: str) -> bool:
+    """True if the live source failed recently and should not be tried again yet."""
+    failed_at = _FAILED_AT.get(name)
+    return failed_at is not None and time.time() - failed_at < RETRY_LIVE_AFTER_SECONDS
+
+
+def mark_live_source_failed(name: str) -> None:
+    _FAILED_AT[name] = time.time()
+
+
 class NSEService:
     """Service for fetching and managing NSE stock data."""
 
@@ -55,7 +72,7 @@ class NSEService:
             self._session.headers.update(NSE_HEADERS)
             # Visit main page first to get cookies
             try:
-                self._session.get("https://www.nseindia.com", timeout=10)
+                self._session.get("https://www.nseindia.com", timeout=5)
             except Exception:
                 pass
         return self._session
@@ -104,37 +121,37 @@ class NSEService:
         return pd.DataFrame()
 
     def _fetch_from_nse_csv(self) -> Optional[pd.DataFrame]:
-        """Fetch equity list CSV from NSE archives."""
-        for attempt in range(1, self.max_retries + 1):
-            try:
-                logger.info(f"Fetching NSE equity CSV (attempt {attempt}/{self.max_retries})")
-                session = self._get_session()
-                response = session.get(NSE_EQUITY_CSV_URL, timeout=30)
-                response.raise_for_status()
+        """Fetch equity list CSV from NSE archives: one short attempt, remembered if it fails."""
+        if live_source_blocked("nse_main"):
+            return None
 
-                df = pd.read_csv(io.StringIO(response.text))
+        try:
+            logger.info("Fetching NSE equity CSV")
+            response = self._get_session().get(NSE_EQUITY_CSV_URL, timeout=LIVE_FETCH_TIMEOUT)
+            response.raise_for_status()
 
-                # Clean column names
-                df.columns = df.columns.str.strip()
+            df = pd.read_csv(io.StringIO(response.text))
 
-                # Parse listing date
-                if " DATE OF LISTING" in df.columns:
-                    df.rename(columns={" DATE OF LISTING": "DATE OF LISTING"}, inplace=True)
-                if "DATE OF LISTING" in df.columns:
-                    df["DATE OF LISTING"] = pd.to_datetime(
-                        df["DATE OF LISTING"], format="%d-%b-%Y", errors="coerce"
-                    )
-                    df["IPO_YEAR"] = df["DATE OF LISTING"].dt.year
+            # Clean column names
+            df.columns = df.columns.str.strip()
 
-                logger.info(f"Fetched {len(df)} stocks from NSE")
-                return df
+            # Parse listing date
+            if " DATE OF LISTING" in df.columns:
+                df.rename(columns={" DATE OF LISTING": "DATE OF LISTING"}, inplace=True)
+            if "DATE OF LISTING" in df.columns:
+                df["DATE OF LISTING"] = pd.to_datetime(
+                    df["DATE OF LISTING"], format="%d-%b-%Y", errors="coerce"
+                )
+                df["IPO_YEAR"] = df["DATE OF LISTING"].dt.year
 
-            except requests.exceptions.RequestException as e:
-                logger.warning(f"NSE CSV fetch attempt {attempt} failed: {e}")
-                if attempt < self.max_retries:
-                    time.sleep(2 ** attempt)  # Exponential backoff
+            logger.info(f"Fetched {len(df)} stocks from NSE")
+            return df
 
-        return None
+        except Exception as e:
+            logger.warning(f"NSE CSV fetch failed ({e}); using bundled list for the next "
+                           f"{RETRY_LIVE_AFTER_SECONDS // 60} min")
+            mark_live_source_failed("nse_main")
+            return None
 
     def get_stocks_by_ipo_year(self, year: int) -> List[Dict]:
         """
@@ -195,9 +212,9 @@ class NSEService:
         if cached_data is not None:
             return pd.read_csv(io.StringIO(cached_data))
 
-        for attempt in range(1, self.max_retries + 1):
+        if not live_source_blocked("nse_sme"):
             try:
-                response = self._get_session().get(NSE_SME_CSV_URL, timeout=30)
+                response = self._get_session().get(NSE_SME_CSV_URL, timeout=LIVE_FETCH_TIMEOUT)
                 response.raise_for_status()
 
                 df = pd.read_csv(io.StringIO(response.text))
@@ -219,9 +236,8 @@ class NSEService:
                 self.cache.set("nse_sme_list", df.to_csv(index=False))
                 return df
             except Exception as e:
-                logger.warning(f"NSE SME CSV fetch attempt {attempt} failed: {e}")
-                if attempt < self.max_retries:
-                    time.sleep(2 ** attempt)
+                logger.warning(f"NSE SME CSV fetch failed ({e}); using bundled list")
+                mark_live_source_failed("nse_sme")
 
         local_path = os.path.join("data", "nse_sme_master.csv")
         if os.path.exists(local_path):

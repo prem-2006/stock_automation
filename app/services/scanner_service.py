@@ -22,7 +22,7 @@ import math
 import random
 import time
 import uuid
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor, as_completed, wait
 from datetime import datetime, timedelta, timezone, UTC
 from typing import List, Dict, Optional, Tuple
 
@@ -45,6 +45,11 @@ SKIP_OLDER_LISTING = "older_listing"            # traded on NSE/BSE before its I
 SKIP_NO_LISTING_MONTH = "no_listing_month_data"  # price data does not cover the listing month
 SKIP_TOO_RECENT = "too_recent"                   # listed in/after the breakout month: no previous-month close
 SKIP_FEW_CANDLES = "few_candles"                 # current-year scan: fewer than MIN_CANDLES_CURRENT_YEAR candles
+
+# Hard time limits so a stalled network call can never leave a scan hanging
+PREFETCH_BUDGET_SECONDS = 240      # bulk price download for the whole universe
+SCAN_BUDGET_SECONDS = 240          # per-stock evaluation (fast_info, fallback requests)
+FALLBACK_BUDGET_SECONDS = 60       # single requests for stocks the bulk download missed
 
 # Minimum monthly candles (listing month through the running month) in a current-year live scan
 MIN_CANDLES_CURRENT_YEAR = 3
@@ -151,6 +156,7 @@ class ScannerService:
             Summary dict with results
         """
         months = breakout_months(target_month, target_year_override)
+        scan_started = time.time()
 
         SessionLocal = get_session_factory()
         session = SessionLocal()
@@ -183,6 +189,8 @@ class ScannerService:
                 session.commit()
                 logger.warning(f"No stocks found for year {year}")
                 return self._build_summary(job, [], months)
+
+            logger.info(f"Universe ready: {len(stocks)} companies in {time.time() - scan_started:.0f}s")
 
             # Step 2: Scan each stock in parallel
             results = self._scan_stocks_parallel(stocks, year, months)
@@ -287,34 +295,59 @@ class ScannerService:
         max_workers = min(self.settings.MAX_WORKERS, len(stocks))
 
         # One bulk download replaces ~2 slow requests per stock
+        started = time.time()
         prefetched = self._prefetch_histories(stocks)
         logger.info(
             f"Scanning {len(stocks)} stocks with {max_workers} workers "
-            f"({len(prefetched)} histories prefetched)"
+            f"({len(prefetched)} histories prefetched in {time.time() - started:.0f}s)"
         )
 
-        with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            future_to_stock = {
-                executor.submit(self._scan_single_stock, stock, year, months, prefetched): stock
-                for stock in stocks
-            }
+        if not prefetched and any(not s.get("unavailable") for s in stocks):
+            # Yahoo answered nothing (blocked or rate limited): grinding through single
+            # requests would take far longer, so tell the user right away instead
+            raise RuntimeError(
+                "Yahoo Finance is not returning price data right now (rate limited). "
+                "Please try again in a few minutes."
+            )
 
-            for future in as_completed(future_to_stock):
-                stock = future_to_stock[future]
-                try:
-                    result = future.result(timeout=60)  # 60s timeout per stock
-                    results.append(result)
-                    status = "✓ QUALIFIED" if result.get("qualified") else "✗ Not qualified"
-                    logger.debug(f"  {stock['symbol']}: {status}")
-                except Exception as e:
-                    logger.error(f"Error scanning {stock.get('symbol', '?')}: {e}")
-                    results.append({
-                        "symbol": stock.get("symbol", "UNKNOWN"),
-                        "company_name": stock.get("company_name", "Unknown"),
-                        "qualified": False,
-                        "error": str(e)[:200],
-                        "skip_reason": SKIP_NO_DATA,
-                    })
+        fallback_deadline = time.time() + FALLBACK_BUDGET_SECONDS
+        executor = ThreadPoolExecutor(max_workers=max_workers)
+        future_to_stock = {
+            executor.submit(self._scan_single_stock, stock, year, months, prefetched, fallback_deadline): stock
+            for stock in stocks
+        }
+
+        done, not_done = wait(future_to_stock, timeout=SCAN_BUDGET_SECONDS)
+        # Do not wait for stragglers: a stalled request must not hold the whole scan
+        executor.shutdown(wait=False, cancel_futures=True)
+
+        for future in done:
+            stock = future_to_stock[future]
+            try:
+                result = future.result()
+                results.append(result)
+                status = "✓ QUALIFIED" if result.get("qualified") else "✗ Not qualified"
+                logger.debug(f"  {stock['symbol']}: {status}")
+            except Exception as e:
+                logger.error(f"Error scanning {stock.get('symbol', '?')}: {e}")
+                results.append({
+                    "symbol": stock.get("symbol", "UNKNOWN"),
+                    "company_name": stock.get("company_name", "Unknown"),
+                    "qualified": False,
+                    "error": str(e)[:200],
+                    "skip_reason": SKIP_NO_DATA,
+                })
+
+        for future in not_done:
+            stock = future_to_stock[future]
+            logger.warning(f"Timed out scanning {stock.get('symbol', '?')}")
+            results.append({
+                "symbol": stock.get("symbol", "UNKNOWN"),
+                "company_name": stock.get("company_name", "Unknown"),
+                "qualified": False,
+                "error": "Timed out",
+                "skip_reason": SKIP_NO_DATA,
+            })
 
         return results
 
@@ -327,15 +360,19 @@ class ScannerService:
             tickers.append(stock.get("yf_symbol") or f"{stock.get('symbol')}.NS")
             if stock.get("segment", "NSE") != "BSE" and stock.get("bse_symbol"):
                 tickers.append(f"{stock['bse_symbol']}.BO")
+        pool = ThreadPoolExecutor(max_workers=1)
         try:
-            return download_monthly_history(tickers)
+            return pool.submit(download_monthly_history, tickers).result(timeout=PREFETCH_BUDGET_SECONDS)
         except Exception as e:
-            logger.warning(f"Bulk prefetch failed, falling back to per-stock requests: {e}")
+            logger.warning(f"Bulk prefetch failed or timed out: {type(e).__name__}: {e}")
             return {}
+        finally:
+            pool.shutdown(wait=False)
 
     def _scan_single_stock(
         self, stock: Dict, year: int, months: BreakoutMonths,
         prefetched: Optional[Dict[str, Optional[pd.DataFrame]]] = None,
+        fallback_deadline: Optional[float] = None,
     ) -> Dict:
         """
         Scan a single stock for a first-ever IPO breakout:
@@ -382,6 +419,10 @@ class ScannerService:
             if prefetched is not None and yf_symbol in prefetched:
                 monthly_data = prefetched[yf_symbol]
             else:
+                if fallback_deadline is not None and time.time() > fallback_deadline:
+                    result["error"] = "Price service busy"
+                    result["skip_reason"] = SKIP_NO_DATA
+                    return result
                 # Not prefetched (bulk request inconclusive): single request, rate limited with jitter
                 time.sleep(self.settings.API_CALL_DELAY + random.uniform(0.2, 1.0))
                 monthly_data = self._fetch_monthly_data(yf_symbol)

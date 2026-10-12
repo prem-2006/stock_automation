@@ -32,6 +32,9 @@ router = APIRouter(tags=["Telegram"])
 scanner_service = ScannerService()
 telegram_service = TelegramService()
 
+# Seconds before a long scan sends a "still working" note
+STILL_WORKING_AFTER_SECONDS = 90
+
 # Detect Vercel
 IS_VERCEL = os.environ.get("VERCEL", "") == "1" or os.environ.get("VERCEL_ENV") is not None
 
@@ -79,6 +82,14 @@ def _process_scan_and_notify(scan_id: str, chat_id: str) -> None:
     1. Runs the scan (which saves to DB).
     2. Sends the results to the user on Telegram.
     """
+    # A slow scan should say it is still alive instead of leaving the chat silent
+    still_working = threading.Timer(
+        STILL_WORKING_AFTER_SECONDS,
+        lambda: telegram_service.send_message(int(chat_id), "⏳ Still scanning, results are coming shortly..."),
+    )
+    still_working.daemon = True
+    still_working.start()
+
     try:
         logger.info(f"Background scan started for job {scan_id}")
 
@@ -90,6 +101,7 @@ def _process_scan_and_notify(scan_id: str, chat_id: str) -> None:
         telegram_service.send_message(int(chat_id), f"❌ Scan failed: {html.escape(str(e))}")
 
     finally:
+        still_working.cancel()
         # Reset conversation state
         _update_conversation_state(chat_id, "idle")
 
