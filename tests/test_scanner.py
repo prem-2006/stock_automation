@@ -21,6 +21,7 @@ os.environ.setdefault("DATABASE_URL", "sqlite:///./test_db.db")
 from app.services.scanner_service import (
     IST,
     ScannerService,
+    SKIP_FEW_CANDLES,
     SKIP_NO_DATA,
     SKIP_NO_LISTING_MONTH,
     SKIP_OLDER_LISTING,
@@ -199,6 +200,7 @@ def _scan(scanner, monkeypatch, nse, bse=None, listing="2024-10-22", year=2024,
     ticker = MagicMock()
     ticker.fast_info.get.return_value = live_price
     monkeypatch.setattr("app.services.scanner_service.yf.Ticker", lambda sym: ticker)
+    monkeypatch.setattr("app.services.scanner_service.now_ist", lambda: datetime(2026, 10, 8, tzinfo=IST))
     stock = {"symbol": "ABC", "company_name": "ABC Ltd", "listing_date": listing,
              "yf_symbol": "ABC.NS", "bse_symbol": "ABC", "segment": "NSE"}
     return scanner._scan_single_stock(stock, year, months)
@@ -284,12 +286,30 @@ class TestScanSingleStock:
         nse = _candles("2026-09-01", [581.95, 643.5], [510.35, 618.3])
         r = _scan(scanner, monkeypatch, nse, listing="2026-09-17", year=2026, months=LIVE_OCT, live_price=618.0)
 
-        assert r["previous_month_close"] == 510.35
+        assert r["skip_reason"] == SKIP_FEW_CANDLES  # current-year scan: only 2 candles
+        assert r["qualified"] is False
+
+    def test_three_candles_are_enough_in_a_current_year_scan(self, scanner, monkeypatch):
+        nse = _candles("2026-08-01", [100.0, 97.0, 99.0], [90.0, 92.0, 95.0])
+        r = _scan(scanner, monkeypatch, nse, listing="2026-08-12", year=2026, months=LIVE_OCT, live_price=104.0)
+
+        assert r["skip_reason"] is None
         assert r["qualified"] is True
+
+    def test_few_candles_rule_is_only_for_the_current_year(self, scanner, monkeypatch):
+        # Bot 1 on an earlier year, and Bot 2 (selected month) are not held to it
+        two = _candles("2025-11-01", [100.0, 101.0], [90.0, 95.0])
+        earlier = _scan(scanner, monkeypatch, two, listing="2025-11-10", year=2025,
+                        months=((2025, 12), (2025, 11), True), live_price=104.0)
+        bot2 = _scan(scanner, monkeypatch, two, listing="2025-11-10", year=2026, months=((2025, 12), (2025, 11), False))
+
+        assert earlier["skip_reason"] is None
+        assert bot2["skip_reason"] is None
 
     def test_listed_this_month_is_too_recent(self, scanner, monkeypatch):
         nse = _candles("2026-10-01", [300.0], [290.0])
-        r = _scan(scanner, monkeypatch, nse, listing="2026-10-06", year=2026, months=LIVE_OCT, live_price=310.0)
+        r = _scan(scanner, monkeypatch, nse, listing="2026-10-06", year=2026,
+                  months=((2026, 10), (2026, 9), False), live_price=310.0)  # Bot 2: no candle rule
 
         assert r["skip_reason"] == SKIP_TOO_RECENT
         assert r["qualified"] is False

@@ -44,6 +44,10 @@ IST = timezone(timedelta(hours=5, minutes=30))
 SKIP_OLDER_LISTING = "older_listing"            # traded on NSE/BSE before its IPO year: not a fresh IPO
 SKIP_NO_LISTING_MONTH = "no_listing_month_data"  # price data does not cover the listing month
 SKIP_TOO_RECENT = "too_recent"                   # listed in/after the breakout month: no previous-month close
+SKIP_FEW_CANDLES = "few_candles"                 # current-year scan: fewer than MIN_CANDLES_CURRENT_YEAR candles
+
+# Minimum monthly candles (listing month through the running month) in a current-year live scan
+MIN_CANDLES_CURRENT_YEAR = 3
 SKIP_NO_DATA = "no_data"                         # no or insufficient price data
 
 # (breakout (year, month), previous (year, month), whether the breakout month is still running)
@@ -413,6 +417,13 @@ class ScannerService:
                 )
                 result["error"] = f"No data for listing month {listing:%Y-%m}"
                 result["skip_reason"] = SKIP_NO_LISTING_MONTH
+                return result
+
+            # Bot 1 on the current year: a stock needs a few monthly candles (running month included)
+            if live and year == now_ist().year and len(monthly_data) < MIN_CANDLES_CURRENT_YEAR:
+                logger.info(f"Skipping {symbol}: only {len(monthly_data)} monthly candle(s)")
+                result["error"] = f"Only {len(monthly_data)} monthly candle(s)"
+                result["skip_reason"] = SKIP_FEW_CANDLES
                 return result
 
             # Step 1: Get the first listed month's HIGH, to the paisa like NSE quotes.

@@ -13,7 +13,9 @@ import httpx
 
 from app.config import get_settings
 from app.services.scanner_service import (
+    MIN_CANDLES_CURRENT_YEAR,
     SKIP_NO_DATA,
+    SKIP_FEW_CANDLES,
     SKIP_NO_LISTING_MONTH,
     SKIP_OLDER_LISTING,
     SKIP_TOO_RECENT,
@@ -140,6 +142,7 @@ def format_scan_summary(summary: dict) -> str:
         labels = {
             SKIP_OLDER_LISTING: "were already trading before their IPO year (not fresh IPOs)",
             SKIP_NO_LISTING_MONTH: "have no price data for their listing month",
+            SKIP_FEW_CANDLES: f"have fewer than {MIN_CANDLES_CURRENT_YEAR} monthly candles (listed too recently)",
             SKIP_TOO_RECENT: (
                 f"listed in {_month(breakout)}{'' if live else ' or later'}, "
                 f"so there is no {_month(previous)} close to compare"
