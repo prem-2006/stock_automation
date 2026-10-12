@@ -32,7 +32,7 @@ import yfinance as yf
 from app.config import get_settings
 from app.database import get_session_factory
 from app.models import ScanJob, ScanResult
-from app.services.listing_service import ListingService
+from app.services.listing_service import ListingService, download_monthly_history
 from app.utils.logger import get_logger
 
 logger = get_logger("scanner")
@@ -286,11 +286,16 @@ class ScannerService:
         results = []
         max_workers = min(self.settings.MAX_WORKERS, len(stocks))
 
-        logger.info(f"Scanning {len(stocks)} stocks with {max_workers} workers")
+        # One bulk download replaces ~2 slow requests per stock
+        prefetched = self._prefetch_histories(stocks)
+        logger.info(
+            f"Scanning {len(stocks)} stocks with {max_workers} workers "
+            f"({len(prefetched)} histories prefetched)"
+        )
 
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             future_to_stock = {
-                executor.submit(self._scan_single_stock, stock, year, months): stock
+                executor.submit(self._scan_single_stock, stock, year, months, prefetched): stock
                 for stock in stocks
             }
 
@@ -313,7 +318,25 @@ class ScannerService:
 
         return results
 
-    def _scan_single_stock(self, stock: Dict, year: int, months: BreakoutMonths) -> Dict:
+    def _prefetch_histories(self, stocks: List[Dict]) -> Dict[str, Optional[pd.DataFrame]]:
+        """Bulk-download monthly history for every ticker a scan will need (NSE/BSE and BSE ids)."""
+        tickers: List[str] = []
+        for stock in stocks:
+            if stock.get("unavailable"):
+                continue
+            tickers.append(stock.get("yf_symbol") or f"{stock.get('symbol')}.NS")
+            if stock.get("segment", "NSE") != "BSE" and stock.get("bse_symbol"):
+                tickers.append(f"{stock['bse_symbol']}.BO")
+        try:
+            return download_monthly_history(tickers)
+        except Exception as e:
+            logger.warning(f"Bulk prefetch failed, falling back to per-stock requests: {e}")
+            return {}
+
+    def _scan_single_stock(
+        self, stock: Dict, year: int, months: BreakoutMonths,
+        prefetched: Optional[Dict[str, Optional[pd.DataFrame]]] = None,
+    ) -> Dict:
         """
         Scan a single stock for a first-ever IPO breakout:
           1. every month from the IPO month through the previous month closed
@@ -355,13 +378,13 @@ class ScannerService:
             result["skip_reason"] = SKIP_NO_DATA
             return result
 
-        # Rate limiting with jitter to avoid Yahoo Finance rate limiting
-        delay = self.settings.API_CALL_DELAY + random.uniform(0.2, 1.0)
-        time.sleep(delay)
-
         try:
-            # Fetch monthly OHLC data with retries
-            monthly_data = self._fetch_monthly_data(yf_symbol)
+            if prefetched is not None and yf_symbol in prefetched:
+                monthly_data = prefetched[yf_symbol]
+            else:
+                # Not prefetched (bulk request inconclusive): single request, rate limited with jitter
+                time.sleep(self.settings.API_CALL_DELAY + random.uniform(0.2, 1.0))
+                monthly_data = self._fetch_monthly_data(yf_symbol)
 
             if monthly_data is None or monthly_data.empty:
                 logger.warning(f"No monthly data for {symbol}")
@@ -398,7 +421,7 @@ class ScannerService:
             # (BSE-only stocks are already read from BSE; others use their BSE id from the ISIN.)
             bse_symbol = stock.get("bse_symbol")
             if segment != "BSE" and bse_symbol and (ipo_year is None or monthly_data.index[0].year >= ipo_year):
-                bse_earlier = self._fetch_bse_months_before(bse_symbol, monthly_data.index[0])
+                bse_earlier = self._fetch_bse_months_before(bse_symbol, monthly_data.index[0], prefetched)
                 if bse_earlier is not None:
                     monthly_data = pd.concat([bse_earlier, monthly_data])
 
@@ -509,14 +532,21 @@ class ScannerService:
             return None
         return None if pd.isna(ts) else ts
 
-    def _fetch_bse_months_before(self, symbol: str, before: pd.Timestamp) -> Optional[pd.DataFrame]:
+    def _fetch_bse_months_before(
+        self, symbol: str, before: pd.Timestamp,
+        prefetched: Optional[Dict[str, Optional[pd.DataFrame]]] = None,
+    ) -> Optional[pd.DataFrame]:
         """
         BSE monthly candles strictly before `before` (the first NSE candle), or None.
 
         A result means the company was already trading on BSE before its NSE data
         starts, i.e. its NSE listing was not its IPO.
         """
-        data = self._fetch_monthly_data(f"{symbol}.BO", retry_on_empty=False)
+        ticker = f"{symbol}.BO"
+        if prefetched is not None and ticker in prefetched:
+            data = prefetched[ticker]
+        else:
+            data = self._fetch_monthly_data(ticker, retry_on_empty=False)
         if data is None or not {"High", "Close"}.issubset(data.columns):
             return None
         earlier = data[data.index < before].dropna(subset=["High", "Close"])
@@ -548,6 +578,8 @@ class ScannerService:
                     # Remove rows with all NaN values
                     data = data.dropna(how="all")
                     if not data.empty:
+                        if data.index.tz is not None:
+                            data.index = data.index.tz_localize(None)  # same month-start dates as the bulk path
                         return data
 
                 if not retry_on_empty:

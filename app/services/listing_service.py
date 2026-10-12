@@ -16,6 +16,8 @@ requesting data that does not exist.
 
 import json
 import os
+import threading
+import time
 from typing import Dict, List, Optional, Set
 
 import pandas as pd
@@ -48,6 +50,61 @@ BSE_SNAPSHOT = os.path.join("data", "bse_listings.csv")
 CHUNK_SIZE = 100
 CONTROL_TICKER = "RELIANCE.NS"
 
+# One bulk Yahoo download and one universe build at a time, even with both bots scanning
+_DOWNLOAD_LOCK = threading.Lock()
+_UNIVERSE_LOCK = threading.Lock()
+
+
+def _load_json(raw: Optional[str]) -> dict:
+    """Parse a cached JSON object; an unreadable cache entry counts as empty."""
+    try:
+        return json.loads(raw) if raw else {}
+    except ValueError:
+        return {}
+
+
+def download_monthly_history(tickers: List[str]) -> Dict[str, Optional[pd.DataFrame]]:
+    """
+    Monthly OHLC history for many tickers in a few bulk requests.
+
+    Prices are actual traded prices (splits/bonuses only) with a tz-naive
+    month-start index. Each ticker maps to its frame, or to None when Yahoo has
+    no data. Tickers whose chunk was inconclusive (request failed or throttled,
+    detected through a liquid control ticker) are left out so callers can retry.
+    """
+    unique = list(dict.fromkeys(tickers))
+    frames: Dict[str, Optional[pd.DataFrame]] = {}
+
+    with _DOWNLOAD_LOCK:
+        for i in range(0, len(unique), CHUNK_SIZE):
+            part = unique[i:i + CHUNK_SIZE]
+            try:
+                data = yf.download(
+                    part + [CONTROL_TICKER], period="max", interval="1mo",
+                    auto_adjust=False, group_by="ticker", threads=True, progress=False,
+                )
+            except Exception as e:
+                logger.warning(f"Bulk Yahoo request failed for {len(part)} tickers: {e}")
+                continue
+
+            chunk: Dict[str, Optional[pd.DataFrame]] = {}
+            for ticker in part + [CONTROL_TICKER]:
+                try:
+                    frame = data[ticker].dropna(subset=["High", "Close"])
+                    chunk[ticker] = frame if len(frame) else None
+                except Exception:
+                    chunk[ticker] = None
+
+            if chunk[CONTROL_TICKER] is None:
+                logger.warning(f"Yahoo did not answer a chunk of {len(part)} tickers; skipping it")
+                continue
+
+            frames.update({t: chunk[t] for t in part})
+            if i + CHUNK_SIZE < len(unique):
+                time.sleep(0.5)  # be gentle between chunks
+
+    return frames
+
 
 class ListingService:
     """Builds the full listing universe for an IPO year."""
@@ -66,6 +123,11 @@ class ListingService:
     # ------------------------------------------------------------------ #
 
     def get_stocks_by_ipo_year(self, year: int) -> List[Dict]:
+        """Thread-safe wrapper: two bots asking at once build the universe one after the other."""
+        with _UNIVERSE_LOCK:
+            return self._build_universe(year)
+
+    def _build_universe(self, year: int) -> List[Dict]:
         """
         Every company that listed in `year` (all years for 0) on NSE, NSE SME or BSE.
 
@@ -137,7 +199,7 @@ class ListingService:
             return
 
         raw = self.cache.get("sme_availability")
-        availability: Dict[str, bool] = json.loads(raw) if raw else {}
+        availability: Dict[str, bool] = _load_json(raw)
 
         missing = [s["yf_symbol"] for s in stocks if s["yf_symbol"] not in availability]
         if missing:
@@ -189,7 +251,7 @@ class ListingService:
             known.update(zip(snapshot["scrip_id"], snapshot["first_trade"]))
 
         raw = self.dating_cache.get("bse_first_trade")
-        extra: Dict[str, str] = json.loads(raw) if raw else {}
+        extra: Dict[str, str] = _load_json(raw)
         known.update(extra)
 
         # Candidates: the live list when we have it, otherwise the snapshot
@@ -230,34 +292,10 @@ class ListingService:
     def _first_trade_months(self, tickers: List[str]) -> Dict[str, Optional[str]]:
         """
         Month ("YYYY-MM") each ticker's Yahoo monthly history starts, or None
-        when Yahoo has no data. Tickers whose check was inconclusive (request
-        failed or throttled) are left out of the result.
+        when Yahoo has no data. Inconclusive checks are left out of the result.
         """
-        result: Dict[str, Optional[str]] = {}
-
-        for i in range(0, len(tickers), CHUNK_SIZE):
-            part = tickers[i:i + CHUNK_SIZE]
-            try:
-                data = yf.download(
-                    part + [CONTROL_TICKER], period="max", interval="1mo",
-                    auto_adjust=False, group_by="ticker", threads=True, progress=False,
-                )
-            except Exception as e:
-                logger.warning(f"Bulk Yahoo request failed for {len(part)} tickers: {e}")
-                continue
-
-            months: Dict[str, Optional[str]] = {}
-            for ticker in part + [CONTROL_TICKER]:
-                try:
-                    candles = data[ticker].dropna(subset=["High", "Close"])
-                    months[ticker] = candles.index[0].strftime("%Y-%m") if len(candles) else None
-                except Exception:
-                    months[ticker] = None
-
-            if months[CONTROL_TICKER] is None:
-                logger.warning(f"Yahoo did not answer a chunk of {len(part)} tickers; skipping it")
-                continue
-
-            result.update({t: months[t] for t in part})
-
-        return result
+        frames = download_monthly_history(tickers)
+        return {
+            ticker: (frame.index[0].strftime("%Y-%m") if frame is not None else None)
+            for ticker, frame in frames.items()
+        }

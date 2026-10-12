@@ -5,6 +5,7 @@ Provides file-based cache with TTL and in-memory LRU cache.
 
 import json
 import os
+import threading
 import time
 from functools import lru_cache
 from typing import Any, Optional
@@ -79,11 +80,16 @@ class FileCache:
         meta_path = self._get_meta_path(key)
 
         try:
-            with open(cache_path, "w", encoding="utf-8") as f:
+            # Write to a temp file and swap it in, so a concurrent reader never sees half a file
+            tmp_path = f"{cache_path}.{os.getpid()}.{threading.get_ident()}.tmp"
+            with open(tmp_path, "w", encoding="utf-8") as f:
                 f.write(value)
+            os.replace(tmp_path, cache_path)
 
-            with open(meta_path, "w") as f:
+            tmp_meta = f"{meta_path}.{os.getpid()}.{threading.get_ident()}.tmp"
+            with open(tmp_meta, "w") as f:
                 json.dump({"timestamp": time.time(), "key": key}, f)
+            os.replace(tmp_meta, meta_path)
 
             logger.debug(f"Cache set for key: {key}")
 
